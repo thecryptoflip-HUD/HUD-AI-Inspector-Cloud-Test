@@ -90,6 +90,158 @@ def execute(sql, args):
         c.execute(sql, args)
         c.commit()
 
+def restore_inspection_backup(uploaded_file):
+    """Validate and restore one portable inspection ZIP without overwriting data."""
+    import stat
+
+    max_zip_bytes = 100 * 1024 * 1024
+    max_unpacked_bytes = 250 * 1024 * 1024
+    max_file_bytes = 25 * 1024 * 1024
+    inspection_columns = ('id', 'property', 'address', 'unit', 'inspector',
+                          'inspected_on', 'notes', 'created_at')
+    evidence_columns = ('id', 'inspection_id', 'area', 'room', 'kind', 'path',
+                        'source_name', 'captured_at', 'findings_json', 'reviewed_json')
+
+    if uploaded_file.size > max_zip_bytes:
+        raise ValueError('ZIP backup exceeds the 100 MB upload limit.')
+
+    with zipfile.ZipFile(io.BytesIO(uploaded_file.getvalue())) as archive:
+        entries = archive.infolist()
+        if len(entries) > 500:
+            raise ValueError('ZIP contains too many entries.')
+        names = [entry.filename for entry in entries]
+        if len(names) != len(set(names)):
+            raise ValueError('ZIP contains duplicate entry names.')
+        if 'inspection.json' not in names:
+            raise ValueError('Backup is missing inspection.json.')
+        if sum(entry.file_size for entry in entries) > max_unpacked_bytes:
+            raise ValueError('ZIP uncompressed contents exceed 250 MB.')
+
+        for entry in entries:
+            name = entry.filename
+            mode = (entry.external_attr >> 16) & 0xFFFF
+            if stat.S_ISLNK(mode):
+                raise ValueError('ZIP contains a symbolic link.')
+            if entry.flag_bits & 0x1:
+                raise ValueError('Encrypted ZIP entries are unsupported.')
+            if entry.file_size > max_file_bytes and name != 'inspection.json':
+                raise ValueError('A ZIP file exceeds the 25 MB per-photo limit.')
+            if name == 'inspection.json':
+                if entry.file_size > 5 * 1024 * 1024:
+                    raise ValueError('Inspection metadata exceeds 5 MB.')
+                continue
+            parts = name.split('/')
+            if (len(parts) != 2 or parts[0] != 'media' or not parts[1]
+                    or parts[1] in ('.', '..') or '\\' in name or '\x00' in name
+                    or entry.is_dir()):
+                raise ValueError('ZIP contains an unexpected or unsafe file path.')
+
+        metadata = json.loads(archive.read('inspection.json'))
+        if not isinstance(metadata, dict) or metadata.get('format') != 'HUD_AI_INSPECTOR_M4_PORTABLE_BACKUP':
+            raise ValueError('This is not a supported HUD AI Inspector backup.')
+        inspection = metadata.get('inspection')
+        evidence = metadata.get('evidence')
+        if not isinstance(inspection, dict) or not isinstance(evidence, list):
+            raise ValueError('Backup inspection or evidence data is invalid.')
+        if len(evidence) > 499:
+            raise ValueError('Backup contains too many evidence records.')
+        if set(inspection) != set(inspection_columns):
+            raise ValueError('Backup inspection fields do not match this app version.')
+        inspection_id = inspection['id']
+        if (not isinstance(inspection_id, str) or not inspection_id.strip()
+                or len(inspection_id) > 100):
+            raise ValueError('Backup has an invalid inspection ID.')
+        if (not isinstance(inspection['property'], str)
+                or not inspection['property'].strip()
+                or len(inspection['property']) > 500):
+            raise ValueError('Backup has an invalid property name.')
+        for column in inspection_columns:
+            value = inspection[column]
+            if value is not None and (not isinstance(value, str) or len(value) > 10000):
+                raise ValueError('Invalid inspection field: ' + column)
+
+        evidence_ids = set()
+        photo_names = set()
+        for item in evidence:
+            if not isinstance(item, dict) or set(item) != set(evidence_columns):
+                raise ValueError('Backup has an invalid evidence record.')
+            eid = item['id']
+            name = item['path']
+            if (not isinstance(eid, str) or not eid.strip()
+                    or len(eid) > 100 or eid in evidence_ids):
+                raise ValueError('Backup has duplicate or invalid evidence IDs.')
+            if item['inspection_id'] != inspection_id:
+                raise ValueError('Evidence belongs to a different inspection.')
+            if (not isinstance(name, str) or not name or len(name) > 255
+                    or name in ('.', '..') or '/' in name or '\\' in name
+                    or '\x00' in name or name in photo_names):
+                raise ValueError('Backup has duplicate or unsafe photo filenames.')
+            if 'media/' + name not in names:
+                raise ValueError('Backup is missing photo: ' + name)
+            for column in evidence_columns:
+                value = item[column]
+                if value is not None and (not isinstance(value, str) or len(value) > 100000):
+                    raise ValueError('Invalid evidence field: ' + column)
+            for column in ('findings_json', 'reviewed_json'):
+                if item[column] is not None:
+                    try:
+                        json.loads(item[column])
+                    except (TypeError, ValueError) as exc:
+                        raise ValueError('Invalid ' + column + ' for evidence ' + eid) from exc
+            evidence_ids.add(eid)
+            photo_names.add(name)
+
+        # Read and validate all photos before writing any records or files.
+        photo_data = {}
+        for name in photo_names:
+            raw = archive.read('media/' + name)
+            try:
+                with Image.open(io.BytesIO(raw)) as img:
+                    img.verify()
+            except Exception as exc:
+                raise ValueError('Backup contains an invalid image: ' + name) from exc
+            photo_data[name] = raw
+
+    MEDIA.mkdir(parents=True, exist_ok=True)
+    created_photos = []
+    connection = db()
+    try:
+        connection.execute('BEGIN IMMEDIATE')
+        if connection.execute('SELECT 1 FROM inspections WHERE id=?', (inspection_id,)).fetchone():
+            raise ValueError('This inspection already exists. Restore cancelled.')
+        for eid in evidence_ids:
+            if connection.execute('SELECT 1 FROM evidence WHERE id=?', (eid,)).fetchone():
+                raise ValueError('An evidence record already exists. Restore cancelled.')
+        for name in photo_names:
+            if (MEDIA / name).exists():
+                raise ValueError('A photo filename already exists. Restore cancelled.')
+
+        # Exclusive creation ensures existing photos are never overwritten.
+        for name, raw in photo_data.items():
+            with (MEDIA / name).open('xb') as destination:
+                created_photos.append(MEDIA / name)
+                destination.write(raw)
+
+        connection.execute(
+            'INSERT INTO inspections (' + ','.join(inspection_columns) + ') VALUES (' + ','.join('?' for _ in inspection_columns) + ')',
+            tuple(inspection[column] for column in inspection_columns)
+        )
+        for item in evidence:
+            connection.execute(
+                'INSERT INTO evidence (' + ','.join(evidence_columns) + ') VALUES (' + ','.join('?' for _ in evidence_columns) + ')',
+                tuple(item[column] for column in evidence_columns)
+            )
+        connection.commit()
+    except Exception:
+        connection.rollback()
+        for photo in created_photos:
+            photo.unlink(missing_ok=True)
+        raise
+    finally:
+        connection.close()
+
+    return inspection_id, len(evidence)
+
 
 def current():
     return st.session_state.get('inspection_id')
@@ -431,6 +583,34 @@ elif page=='New / Open Inspection':
         if st.button('Open selected inspection',use_container_width=True):
             st.session_state['inspection_id']=choices[choice]
             st.success('Inspection opened.')
+
+    st.divider()
+    st.subheader('Restore Inspection Backup (ZIP)')
+
+    backup_file = st.file_uploader(
+        'Choose a previously downloaded inspection backup ZIP',
+        type=['zip'],
+        key='restore_backup'
+    )
+
+    if backup_file and st.button('Restore inspection backup'):
+        try:
+            restored_id, photo_count = restore_inspection_backup(backup_file)
+
+            st.session_state['inspection_id'] = restored_id
+
+            st.success(
+                f'Inspection restored successfully with '
+                f'{photo_count} evidence images.'
+            )
+
+            st.info(
+                'Your restored inspection is now selected. '
+                'Open Review Findings to check the results.'
+            )
+
+        except Exception as error:
+            st.error(f'Restore failed: {error}')
 
 elif page=='Capture & Upload':
     if not current():
