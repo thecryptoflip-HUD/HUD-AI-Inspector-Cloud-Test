@@ -111,20 +111,53 @@ def save_photo(inspection_id, area, room, img, source, kind='photo'):
 def analyze(img, area, room):
     key = os.getenv('OPENAI_API_KEY', '').strip()
     if not key:
-        raise RuntimeError('Set OPENAI_API_KEY in your .env file to enable AI photo/video-frame analysis.')
+        raise RuntimeError('OPENAI_API_KEY is missing from the app secrets.')
     from openai import OpenAI
     client = OpenAI(api_key=key, timeout=90)
     payload = base64.b64encode(image_bytes(img)).decode('ascii')
     prompt = f'''You assist a human property inspector. Location supplied by inspector: {area} / {room}.
-Identify ONLY clearly visible potential maintenance/safety conditions. Do not invent measurements, test results, NSPIRE standards, official deficiency levels, or compliance decisions. When uncertain, say so. Do not claim the entire room was inspected. Return JSON with key findings, an array of up to 8 objects with string keys title, visual_evidence, field_check, and confidence (low/medium/high). Return key summary as a short string. If nothing evident, return an empty findings list. Never assign official HUD/NSPIRE citations or severity.''' 
-    resp = client.responses.create(model=os.getenv('OPENAI_MODEL', 'gpt-4.1-mini'), input=[{'role':'user','content':[{'type':'input_text','text':prompt},{'type':'input_image','image_url':'data:image/jpeg;base64,'+payload}]}], max_output_tokens=1300)
-    text = resp.output_text.strip()
-    if text.startswith('```'):
-        text = re.sub(r'^```(?:json)?\s*|\s*```$', '', text).strip()
-    parsed = json.loads(text)
+Identify ONLY clearly visible potential maintenance/safety conditions. Do not invent measurements, test results, NSPIRE standards, official deficiency levels, or compliance decisions. When uncertain, say so. Do not claim the entire room was inspected. Return at most 8 potential observations. If nothing evident, return an empty findings list. Never assign official HUD/NSPIRE citations or severity.'''
+    schema = {
+        'type': 'object',
+        'properties': {
+            'summary': {'type': 'string'},
+            'findings': {
+                'type': 'array',
+                'items': {
+                    'type': 'object',
+                    'properties': {
+                        'title': {'type': 'string'},
+                        'visual_evidence': {'type': 'string'},
+                        'field_check': {'type': 'string'},
+                        'confidence': {'type': 'string', 'enum': ['low', 'medium', 'high']}
+                    },
+                    'required': ['title', 'visual_evidence', 'field_check', 'confidence'],
+                    'additionalProperties': False
+                }
+            }
+        },
+        'required': ['summary', 'findings'],
+        'additionalProperties': False
+    }
+    resp = client.responses.create(
+        model=os.getenv('OPENAI_MODEL', 'gpt-4.1-mini'),
+        input=[{'role': 'user', 'content': [
+            {'type': 'input_text', 'text': prompt},
+            {'type': 'input_image', 'image_url': 'data:image/jpeg;base64,' + payload}
+        ]}],
+        text={'format': {'type': 'json_schema', 'name': 'inspection_screening', 'strict': True, 'schema': schema}},
+        max_output_tokens=2200
+    )
+    if resp.status != 'completed':
+        raise RuntimeError('AI response was incomplete. Please retry the analysis.')
+    output = (resp.output_text or '').strip()
+    if not output:
+        raise RuntimeError('AI returned no findings text. Please retry the analysis.')
+    parsed = json.loads(output)
     if not isinstance(parsed, dict) or not isinstance(parsed.get('findings'), list):
         raise ValueError('AI response did not contain the expected findings structure.')
-    return {'summary': str(parsed.get('summary','')), 'findings': [x for x in parsed['findings'] if isinstance(x,dict)][:8]}
+    return {'summary': str(parsed.get('summary', '')),
+            'findings': [x for x in parsed['findings'] if isinstance(x, dict)][:8]}
 
 
 def frames_from_video(raw, suffix, max_frames=8):
