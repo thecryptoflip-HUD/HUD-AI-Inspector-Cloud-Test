@@ -36,7 +36,16 @@ MEDIA.mkdir(exist_ok=True)
 
 st.set_page_config(page_title='HUD AI Inspector | Milestone 4', page_icon='🏠', layout='wide')
 st.markdown('''<style>.block-container{max-width:1100px;padding-top:1.3rem}button{min-height:2.5rem} @media(max-width:650px){.block-container{padding-left:1rem;padding-right:1rem}}</style>''', unsafe_allow_html=True)
-
+st.markdown("""
+<style>
+html, body {
+    overscroll-behavior-y: none;
+}
+[data-testid="stAppViewContainer"] {
+    overscroll-behavior-y: contain;
+}
+</style>
+""", unsafe_allow_html=True)
 
 def require_login():
     """Password gate for a single-inspector deployment; not multi-user authorization."""
