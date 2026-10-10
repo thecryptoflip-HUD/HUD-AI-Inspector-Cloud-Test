@@ -1,0 +1,2 @@
+[server]
+disconnectedSessionTTL = 3600
