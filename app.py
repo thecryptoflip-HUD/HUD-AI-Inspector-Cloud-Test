@@ -814,7 +814,23 @@ elif page=='NSPIRE Smart Assistant':
         if not matches:
             st.warning('No matching text found in your local reference PDFs. No verified NSPIRE answer is available from this library.')
         else:
-            st.markdown('#### Relevant source excerpts (not a compliance determination)')
+            st.markdown('#### Quick Reference Summary')
+
+            first_match = matches[0]
+            st.write(first_match['excerpt'][:500])
+
+            st.caption(
+                f"Source: {first_match['file']} — "
+                f"PDF page {first_match['page']}"
+            )
+
+            st.warning(
+                'This is a shortened source excerpt, not an official '
+                'HUD compliance determination. Verify the full standard.'
+            )
+
+            st.markdown('#### Detailed HUD Reference Excerpts')
+
             spoken_parts=[]
             for result in matches:
                 st.markdown(f"**{result['file']} — PDF page {result['page']}**")
