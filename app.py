@@ -10,7 +10,6 @@ import io
 import json
 import os
 import re
-import sqlite3
 import tempfile
 import uuid
 import time
@@ -30,7 +29,6 @@ load_dotenv()
 ROOT = Path(__file__).resolve().parent
 DATA = Path(os.getenv('HUD_DATA_DIR', '/tmp/hud_inspector_demo_data'))
 DATA.mkdir(parents=True, exist_ok=True)
-DB = DATA / 'inspections.sqlite3'
 MEDIA = DATA / 'media'
 MEDIA.mkdir(exist_ok=True)
 
@@ -47,209 +45,177 @@ html, body {
 </style>
 """, unsafe_allow_html=True)
 
-def require_login():
-    """Password gate for a single-inspector deployment; not multi-user authorization."""
-    expected = os.getenv('HUD_INSPECTOR_PASSWORD', '').strip()
-    if not expected:
-        st.error('Security setup required: set HUD_INSPECTOR_PASSWORD in .env before using this version.')
-        st.stop()
-    if not st.session_state.get('authenticated', False):
-        st.title('🔒 HUD AI Inspector — Sign in')
-        with st.form('login'):
-            supplied = st.text_input('Inspector password', type='password')
-            clicked = st.form_submit_button('Sign in', use_container_width=True)
-        if clicked:
-            if hmac.compare_digest(supplied.encode(), expected.encode()):
-                st.session_state['authenticated'] = True
-                st.rerun()
-            else:
-                st.error('Incorrect password.')
-        st.stop()
+from supabase import create_client
 
+BUCKET = "inspection-evidence"
+
+def config(name, default=""):
+    value = os.getenv(name, "")
+    if value:
+        return value
+    try:
+        return st.secrets.get(name, default)
+    except Exception:
+        return default
+
+def require_login():
+    """Username UI; Supabase Auth email/password behind a server-side mapping.
+    This test-only mapping must be kept in private app secrets, never Git.
+    """
+    url = config("SUPABASE_URL")
+    key = config("SUPABASE_PUBLISHABLE_KEY")
+    if not url or not key:
+        st.error("Set SUPABASE_URL and SUPABASE_PUBLISHABLE_KEY in private Streamlit secrets.")
+        st.stop()
+    if st.session_state.get("auth_user") and st.session_state.get("sb_client"):
+        try:
+            client = st.session_state["sb_client"]
+            session = client.auth.get_session()
+            if session and session.user and session.user.id == st.session_state["auth_user"]:
+                return
+        except Exception:
+            pass
+        st.session_state.pop("auth_user", None)
+        st.session_state.pop("sb_client", None)
+    st.title("🔒 HUD AI Inspector — Sign in")
+    with st.form("login"):
+        username = st.text_input("Username").strip().lower()
+        password = st.text_input("Password", type="password")
+        clicked = st.form_submit_button("Sign in", use_container_width=True)
+    if clicked:
+        try:
+            mapping = json.loads(config("HUD_USERNAME_EMAIL_MAP", "{}"))
+            email = mapping.get(username)
+            if not email:
+                raise ValueError("Invalid credentials")
+            client = create_client(url, key)
+            result = client.auth.sign_in_with_password({"email": email, "password": password})
+            if not result.user or not result.session:
+                raise ValueError("Invalid credentials")
+            profile = client.table("inspector_profiles").select("username").eq("user_id", result.user.id).single().execute().data
+            if not profile or profile.get("username") != username:
+                raise ValueError("Invalid credentials")
+            st.session_state["sb_client"] = client
+            st.session_state["auth_user"] = result.user.id
+            st.session_state["authenticated"] = True
+            st.rerun()
+        except Exception:
+            st.error("Sign in failed. Check your username and password.")
+    st.stop()
 
 require_login()
 
+def client():
+    c = st.session_state.get("sb_client")
+    if not c or not st.session_state.get("auth_user"):
+        st.error("Your session has expired. Sign in again.")
+        st.stop()
+    return c
 
-def db():
-    connection = sqlite3.connect(DB)
-    connection.row_factory = sqlite3.Row
-    connection.execute('PRAGMA foreign_keys=ON')
-    connection.execute('''CREATE TABLE IF NOT EXISTS inspections (id TEXT PRIMARY KEY, property TEXT NOT NULL, address TEXT, unit TEXT, inspector TEXT, inspected_on TEXT, notes TEXT, created_at TEXT)''')
-    connection.execute('''CREATE TABLE IF NOT EXISTS audit_events (id TEXT PRIMARY KEY, inspection_id TEXT, event TEXT, occurred_at TEXT)''')
-    connection.execute('''CREATE TABLE IF NOT EXISTS evidence (id TEXT PRIMARY KEY, inspection_id TEXT NOT NULL REFERENCES inspections(id), area TEXT, room TEXT, kind TEXT, path TEXT, source_name TEXT, captured_at TEXT, findings_json TEXT, reviewed_json TEXT)''')
-    connection.commit()
-    return connection
-
+def owned_inspection(inspection_id):
+    r = client().table("inspections").select("id").eq("id", inspection_id).limit(1).execute().data
+    return bool(r)
 
 def rows(sql, args=()):
-    with db() as c:
-        return [dict(r) for r in c.execute(sql, args).fetchall()]
+    """Narrow, fail-closed translator for the original app's known SELECT statements."""
+    s = " ".join(sql.strip().lower().split())
+    if s == "select * from inspections order by created_at desc":
+        return client().table("inspections").select("*").order("created_at", desc=True).execute().data
+    if s == "select id from evidence":
+        return client().table("evidence").select("id").execute().data
+    if s == "select * from inspections where id=?":
+        return client().table("inspections").select("*").eq("id", args[0]).execute().data
+    if s.startswith("select * from evidence where inspection_id=?"):
+        q = client().table("evidence").select("*").eq("inspection_id", args[0])
+        if "order by captured_at,id" in s:
+            q = q.order("captured_at").order("id")
+        return [decode_evidence(x) for x in q.execute().data]
+    if s == "select occurred_at,event from audit_events where inspection_id=? order by occurred_at desc limit 500":
+        return client().table("audit_events").select("occurred_at,event").eq("inspection_id",args[0]).order("occurred_at",desc=True).limit(500).execute().data
+    raise RuntimeError("Unsupported database query: " + sql)
 
+def decode_evidence(record):
+    item = dict(record)
+    for field, default in (("findings_json", []), ("reviewed_json", {})):
+        value = item.get(field)
+        item[field] = json.dumps(value if value is not None else default)
+    return item
 
 def execute(sql, args):
-    with db() as c:
-        c.execute(sql, args)
-        # Milestone 7: record only the event type and record ID, never review text.
-        if sql.lstrip().upper().startswith('UPDATE EVIDENCE SET REVIEWED_JSON') and len(args) >= 2:
-            evidence_id = str(args[-1])
-            record = c.execute('SELECT inspection_id FROM evidence WHERE id=?', (evidence_id,)).fetchone()
-            if record:
-                c.execute('INSERT INTO audit_events VALUES (?,?,?,?)',
-                          (str(uuid.uuid4()), record['inspection_id'], 'Inspector review saved: evidence ' + evidence_id[:12], datetime.utcnow().isoformat() + 'Z'))
-        c.commit()
+    s = " ".join(sql.strip().lower().split())
+    if s == "insert into inspections values (?,?,?,?,?,?,?,?)":
+        keys = ("id","property","address","unit","inspector","inspected_on","notes","created_at")
+        record = dict(zip(keys, args))
+        record["owner_id"] = st.session_state["auth_user"]
+        client().table("inspections").insert(record).execute()
+        return
+    if s == "insert into evidence values (?,?,?,?,?,?,?,?,?,?)":
+        keys = ("id","inspection_id","area","room","kind","path","source_name","captured_at","findings_json","reviewed_json")
+        record = dict(zip(keys, args))
+        for field in ("findings_json", "reviewed_json"):
+            record[field] = json.loads(record[field])
+        client().table("evidence").insert(record).execute()
+        return
+    if s.startswith("update evidence set ") and " where id=?" in s:
+        if s == "update evidence set findings_json=? where id=?":
+            values = {"findings_json": json.loads(args[0])}
+        elif s == "update evidence set findings_json=?,reviewed_json=? where id=?":
+            values = {"findings_json": json.loads(args[0]), "reviewed_json": json.loads(args[1])}
+        elif s == "update evidence set reviewed_json=? where id=?":
+            values = {"reviewed_json": json.loads(args[0])}
+        else:
+            raise RuntimeError("Unsupported evidence update")
+        evidence_id = args[-1]
+        changed = client().table("evidence").update(values).eq("id", evidence_id).execute().data
+        if not changed:
+            raise PermissionError("Evidence was not found or is not owned by this inspector")
+        if "reviewed_json" in values:
+            # The database trigger creates an audit event, without review text.
+            pass
+        return
+    raise RuntimeError("Unsupported database mutation: " + sql)
+
+def media_path(item):
+    """Fetch an authorized object into a session/user-scoped local render cache."""
+    name = Path(item["path"]).name
+    if name != item["path"] or not re.fullmatch(r"[0-9a-f-]{36}\.jpg", name):
+        raise ValueError("Invalid media name")
+    iid = item["inspection_id"]
+    if not owned_inspection(iid):
+        raise PermissionError("Inspection not accessible")
+    folder = MEDIA / st.session_state["auth_user"] / iid
+    folder.mkdir(parents=True, exist_ok=True)
+    destination = folder / name
+    if not destination.exists():
+        raw = client().storage.from_(BUCKET).download(f"{st.session_state['auth_user']}/{iid}/{name}")
+        destination.write_bytes(raw)
+    return destination
+
+def save_photo(inspection_id, area, room, img, source, kind="photo"):
+    if not owned_inspection(inspection_id):
+        raise PermissionError("Inspection not accessible")
+    eid = str(uuid.uuid4())
+    name = eid + ".jpg"
+    raw = image_bytes(img)
+    object_path = f"{st.session_state['auth_user']}/{inspection_id}/{name}"
+    client().storage.from_(BUCKET).upload(object_path, raw, {"content-type": "image/jpeg", "upsert": "false"})
+    try:
+        execute("INSERT INTO evidence VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (eid,inspection_id,area,room,kind,name,source,datetime.now().isoformat(timespec="seconds"),"[]","{}"))
+    except Exception:
+        try:
+            client().storage.from_(BUCKET).remove([object_path])
+        except Exception:
+            pass
+        raise
+    folder = MEDIA / st.session_state["auth_user"] / inspection_id
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / name).write_bytes(raw)
+    return eid
 
 def restore_inspection_backup(uploaded_file):
-    """Validate and restore one portable inspection ZIP without overwriting data."""
-    import stat
-
-    max_zip_bytes = 100 * 1024 * 1024
-    max_unpacked_bytes = 250 * 1024 * 1024
-    max_file_bytes = 25 * 1024 * 1024
-    inspection_columns = ('id', 'property', 'address', 'unit', 'inspector',
-                          'inspected_on', 'notes', 'created_at')
-    evidence_columns = ('id', 'inspection_id', 'area', 'room', 'kind', 'path',
-                        'source_name', 'captured_at', 'findings_json', 'reviewed_json')
-
-    if uploaded_file.size > max_zip_bytes:
-        raise ValueError('ZIP backup exceeds the 100 MB upload limit.')
-
-    with zipfile.ZipFile(io.BytesIO(uploaded_file.getvalue())) as archive:
-        entries = archive.infolist()
-        if len(entries) > 500:
-            raise ValueError('ZIP contains too many entries.')
-        names = [entry.filename for entry in entries]
-        if len(names) != len(set(names)):
-            raise ValueError('ZIP contains duplicate entry names.')
-        if 'inspection.json' not in names:
-            raise ValueError('Backup is missing inspection.json.')
-        if sum(entry.file_size for entry in entries) > max_unpacked_bytes:
-            raise ValueError('ZIP uncompressed contents exceed 250 MB.')
-
-        for entry in entries:
-            name = entry.filename
-            mode = (entry.external_attr >> 16) & 0xFFFF
-            if stat.S_ISLNK(mode):
-                raise ValueError('ZIP contains a symbolic link.')
-            if entry.flag_bits & 0x1:
-                raise ValueError('Encrypted ZIP entries are unsupported.')
-            if entry.file_size > max_file_bytes and name != 'inspection.json':
-                raise ValueError('A ZIP file exceeds the 25 MB per-photo limit.')
-            if name == 'inspection.json':
-                if entry.file_size > 5 * 1024 * 1024:
-                    raise ValueError('Inspection metadata exceeds 5 MB.')
-                continue
-            parts = name.split('/')
-            if (len(parts) != 2 or parts[0] != 'media' or not parts[1]
-                    or parts[1] in ('.', '..') or '\\' in name or '\x00' in name
-                    or entry.is_dir()):
-                raise ValueError('ZIP contains an unexpected or unsafe file path.')
-
-        metadata = json.loads(archive.read('inspection.json'))
-        if not isinstance(metadata, dict) or metadata.get('format') != 'HUD_AI_INSPECTOR_M4_PORTABLE_BACKUP':
-            raise ValueError('This is not a supported HUD AI Inspector backup.')
-        inspection = metadata.get('inspection')
-        evidence = metadata.get('evidence')
-        if not isinstance(inspection, dict) or not isinstance(evidence, list):
-            raise ValueError('Backup inspection or evidence data is invalid.')
-        if len(evidence) > 499:
-            raise ValueError('Backup contains too many evidence records.')
-        if set(inspection) != set(inspection_columns):
-            raise ValueError('Backup inspection fields do not match this app version.')
-        inspection_id = inspection['id']
-        if (not isinstance(inspection_id, str) or not inspection_id.strip()
-                or len(inspection_id) > 100):
-            raise ValueError('Backup has an invalid inspection ID.')
-        if (not isinstance(inspection['property'], str)
-                or not inspection['property'].strip()
-                or len(inspection['property']) > 500):
-            raise ValueError('Backup has an invalid property name.')
-        for column in inspection_columns:
-            value = inspection[column]
-            if value is not None and (not isinstance(value, str) or len(value) > 10000):
-                raise ValueError('Invalid inspection field: ' + column)
-
-        evidence_ids = set()
-        photo_names = set()
-        for item in evidence:
-            if not isinstance(item, dict) or set(item) != set(evidence_columns):
-                raise ValueError('Backup has an invalid evidence record.')
-            eid = item['id']
-            name = item['path']
-            if (not isinstance(eid, str) or not eid.strip()
-                    or len(eid) > 100 or eid in evidence_ids):
-                raise ValueError('Backup has duplicate or invalid evidence IDs.')
-            if item['inspection_id'] != inspection_id:
-                raise ValueError('Evidence belongs to a different inspection.')
-            if (not isinstance(name, str) or not name or len(name) > 255
-                    or name in ('.', '..') or '/' in name or '\\' in name
-                    or '\x00' in name or name in photo_names):
-                raise ValueError('Backup has duplicate or unsafe photo filenames.')
-            if 'media/' + name not in names:
-                raise ValueError('Backup is missing photo: ' + name)
-            for column in evidence_columns:
-                value = item[column]
-                if value is not None and (not isinstance(value, str) or len(value) > 100000):
-                    raise ValueError('Invalid evidence field: ' + column)
-            for column in ('findings_json', 'reviewed_json'):
-                if item[column] is not None:
-                    try:
-                        json.loads(item[column])
-                    except (TypeError, ValueError) as exc:
-                        raise ValueError('Invalid ' + column + ' for evidence ' + eid) from exc
-            evidence_ids.add(eid)
-            photo_names.add(name)
-
-        # Read and validate all photos before writing any records or files.
-        photo_data = {}
-        for name in photo_names:
-            raw = archive.read('media/' + name)
-            try:
-                with Image.open(io.BytesIO(raw)) as img:
-                    img.verify()
-            except Exception as exc:
-                raise ValueError('Backup contains an invalid image: ' + name) from exc
-            photo_data[name] = raw
-
-    MEDIA.mkdir(parents=True, exist_ok=True)
-    created_photos = []
-    connection = db()
-    try:
-        connection.execute('BEGIN IMMEDIATE')
-        if connection.execute('SELECT 1 FROM inspections WHERE id=?', (inspection_id,)).fetchone():
-            raise ValueError('This inspection already exists. Restore cancelled.')
-        for eid in evidence_ids:
-            if connection.execute('SELECT 1 FROM evidence WHERE id=?', (eid,)).fetchone():
-                raise ValueError('An evidence record already exists. Restore cancelled.')
-        for name in photo_names:
-            if (MEDIA / name).exists():
-                raise ValueError('A photo filename already exists. Restore cancelled.')
-
-        # Exclusive creation ensures existing photos are never overwritten.
-        for name, raw in photo_data.items():
-            with (MEDIA / name).open('xb') as destination:
-                created_photos.append(MEDIA / name)
-                destination.write(raw)
-
-        connection.execute(
-            'INSERT INTO inspections (' + ','.join(inspection_columns) + ') VALUES (' + ','.join('?' for _ in inspection_columns) + ')',
-            tuple(inspection[column] for column in inspection_columns)
-        )
-        for item in evidence:
-            connection.execute(
-                'INSERT INTO evidence (' + ','.join(evidence_columns) + ') VALUES (' + ','.join('?' for _ in evidence_columns) + ')',
-                tuple(item[column] for column in evidence_columns)
-            )
-        connection.commit()
-    except Exception:
-        connection.rollback()
-        for photo in created_photos:
-            photo.unlink(missing_ok=True)
-        raise
-    finally:
-        connection.close()
-
-    return inspection_id, len(evidence)
-
+    """Development safety: block restore until atomic import has been validated."""
+    raise RuntimeError("Cloud ZIP restore is intentionally disabled in this development build. Existing ZIP exports remain available. A transaction-safe, verified importer must be tested before enabling restore.")
 
 def current():
     return st.session_state.get('inspection_id')
@@ -266,15 +232,6 @@ def normalized_image(raw):
         img = ImageOps.exif_transpose(src)
         img.thumbnail((1600, 1600))
         return img.convert('RGB').copy()
-
-
-def save_photo(inspection_id, area, room, img, source, kind='photo'):
-    eid = str(uuid.uuid4())
-    name = eid + '.jpg'
-    (MEDIA / name).write_bytes(image_bytes(img))
-    execute('''INSERT INTO evidence VALUES (?,?,?,?,?,?,?,?,?,?)''',
-            (eid, inspection_id, area, room, kind, name, source, datetime.now().isoformat(timespec='seconds'), '[]', '{}'))
-    return eid
 
 
 def analyze(img, area, room):
@@ -428,7 +385,7 @@ def inspection_quality_checks(inspection, evidence):
         add('Evidence', 'Needs attention', 'No evidence images or frames are saved.')
     for item in evidence:
         name = Path(item.get('path') or '').name
-        if not name or not (MEDIA / name).is_file():
+        if not name or not media_path(item).is_file():
             add('Evidence', 'Needs attention', f'Missing evidence file for record {item.get("id", "unknown")}.')
         try:
             findings = json.loads(item.get('findings_json') or '[]')
@@ -532,7 +489,7 @@ def full_inspection_backup(inspection,evidence):
         archive.writestr('inspection.json',json.dumps(metadata,indent=2))
         for item in evidence:
             name=Path(item.get('path') or '').name
-            file=MEDIA/name
+            file=media_path(item)
             if name and file.is_file():
                 archive.write(file,arcname='media/'+name)
     return output.getvalue()
@@ -578,7 +535,7 @@ def pdf_report(inspection, evidence):
         story.extend([PageBreak(), Paragraph(f'Evidence {idx}: {escape(item["area"] or "Unspecified")} / {escape(item["room"] or "Unspecified")}', styles['Heading2'])])
         if item['kind']=='video_frame':
             story.append(Paragraph(f'Video frame: {escape(item["source_name"] or "")}', styles['BodyText']))
-        image_path = MEDIA / item['path']
+        image_path = media_path(item)
         if image_path.is_file():
             with Image.open(image_path) as img:
                 width,height=img.size
@@ -703,16 +660,23 @@ def review_live_frame(frame_bytes, inspection_id, area, room, run_ai):
 
 
 st.title('🏠 HUD AI Inspector')
-st.caption('Milestones 1–10 • CLOUD TEST • Phone camera • AI screening • Voice • PDF summary • Temporary storage')
-st.error('CLOUD TEST ONLY: Use invented property details and synthetic/non-resident photos. Free hosting can delete saved inspections at any time. Do not upload real resident data or private inspection evidence.')
+st.caption('Milestones 1–10 • CLOUD TEST • Phone camera • AI screening • Voice • PDF summary • Supabase development storage')
+st.error('CLOUD TEST ONLY: Use invented property details and synthetic/non-resident photos. Cloud storage is under development and is not approved for real resident records. Do not upload real resident data or private inspection evidence.')
 st.warning('AI observations are not official NSPIRE findings. Confirm relevant HUD standards, perform required physical checks, and document your own determination.')
 
 with st.sidebar:
     st.header('Inspection workspace')
     page = st.radio('Go to', ['Dashboard', 'New / Open Inspection', 'Capture & Upload', 'Live Camera Preview', 'Continuous Live Scanner', 'Review Findings', 'Milestone 6 Review Center', 'Milestone 6 Quality Check', 'Milestone 7 Audit Trail', 'Milestone 8 Backup Validator', 'Milestone 9 Security Readiness', 'Milestone 10 Test Center', 'NSPIRE Smart Assistant', 'NSPIRE Reference Search', 'Report & Export', 'Phone Setup'], label_visibility='collapsed')
-    st.caption('Single-inspector password protection is enabled. Use HTTPS and a private, secured deployment for cellular access.')
+    st.caption('Supabase test-account authentication is enabled. Synthetic data only.')
     if st.button('Sign out'):
         st.session_state['authenticated'] = False
+        try:
+            client().auth.sign_out()
+        except Exception:
+            pass
+        st.session_state.pop('sb_client', None)
+        st.session_state.pop('auth_user', None)
+        st.session_state.pop('inspection_id', None)
         st.rerun()
 
 if page=='Dashboard':
@@ -923,7 +887,7 @@ elif page=='Review Findings':
             st.info('No evidence saved yet.')
         for i,item in enumerate(evidence):
             with st.expander(f'{i+1}. {item["area"]} / {item["room"]} — {item["source_name"]}',expanded=i==0):
-                path=MEDIA/item['path']
+                path=media_path(item)
                 if not path.exists():
                     st.error('Evidence image missing from local storage.')
                     continue

@@ -1,9 +1,9 @@
-streamlit>=1.39,<2
+streamlit>=1.42,<2
+supabase>=2.10,<3
 Pillow>=10,<13
 python-dotenv>=1,<2
 reportlab>=4,<5
-openai>=1.50,<3
-pypdf>=4,<7
-opencv-python-headless>=4.8,<5
+openai>=1.70,<3
+pypdf>=5,<7
+opencv-python-headless>=4.9,<5
 streamlit-webrtc>=0.47,<1
-av>=12,<17
