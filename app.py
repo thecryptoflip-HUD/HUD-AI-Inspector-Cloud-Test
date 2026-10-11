@@ -817,7 +817,7 @@ elif page=='NSPIRE Smart Assistant':
             st.markdown('#### Quick Reference Summary')
 
             first_match = matches[0]
-            st.write(first_match['excerpt'][:500])
+            st.info(first_match['excerpt'][:500])
 
             st.caption(
                 f"Source: {first_match['file']} — "
