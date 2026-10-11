@@ -373,6 +373,35 @@ def finding_summary(evidence):
     return total,counts
 
 
+def inspector_summary_details(evidence):
+    """Derive a read-only inspector summary from saved evidence and reviews."""
+    details = []
+    for item in evidence:
+        try:
+            findings = json.loads(item.get('findings_json') or '[]')
+            reviews = json.loads(item.get('reviewed_json') or '{}')
+        except (ValueError, TypeError):
+            continue
+        if not isinstance(findings, list) or not isinstance(reviews, dict):
+            continue
+        for index, finding in enumerate(findings):
+            if not isinstance(finding, dict):
+                continue
+            review = reviews.get(str(index), {})
+            if not isinstance(review, dict):
+                review = {}
+            details.append({
+                'location': ' / '.join(part for part in [item.get('area'), item.get('room')] if part) or 'Unspecified',
+                'title': str(finding.get('title') or 'Potential observation'),
+                'status': str(review.get('determination') or 'Not reviewed'),
+                'notes': str(review.get('notes') or ''),
+                'reference': str(review.get('reference') or ''),
+                'field_check': str(finding.get('field_check') or ''),
+                'source': str(item.get('source_name') or ''),
+            })
+    return details
+
+
 def full_inspection_backup(inspection,evidence):
     """Portable ZIP with metadata and images, no passwords/API keys."""
     output=io.BytesIO()
@@ -405,6 +434,24 @@ def pdf_report(inspection, evidence):
         story.append(Paragraph(f'{escape(status)}: {number}',styles['BodyText']))
     story.append(Spacer(1,8))
     story.append(Paragraph('Unreviewed observations require inspector verification; an absence of AI observations is not an inspection pass.',styles['BodyText']))
+    if inspection.get('notes'):
+        story.extend([Spacer(1,12), Paragraph('General inspector notes', styles['Heading2']),
+                      Paragraph(escape(str(inspection['notes'])).replace('\n', '<br/>'), styles['BodyText'])])
+    summary_details = inspector_summary_details(evidence)
+    follow_up = [d for d in summary_details if d['status'] in ('Not reviewed', 'Needs closer inspection')]
+    story.extend([Spacer(1,14), Paragraph('Inspector review and follow-up summary', styles['Heading2'])])
+    if not summary_details:
+        story.append(Paragraph('No AI-suggested observations recorded. This is not an inspection pass.', styles['BodyText']))
+    else:
+        story.append(Paragraph(f'Observations requiring review or closer inspection: {len(follow_up)}', styles['BodyText']))
+        for d in summary_details:
+            story.append(Paragraph(
+                f'<b>{escape(d["status"])}:</b> {escape(d["title"])} — {escape(d["location"])}', styles['BodyText']))
+            if d['notes']:
+                story.append(Paragraph(f'Inspector notes: {escape(d["notes"])}', styles['BodyText']))
+            if d['reference']:
+                story.append(Paragraph(f'Inspector-entered NSPIRE reference (verify): {escape(d["reference"])}', styles['BodyText']))
+            story.append(Spacer(1,5))
     for idx, item in enumerate(evidence,1):
         story.extend([PageBreak(), Paragraph(f'Evidence {idx}: {escape(item["area"] or "Unspecified")} / {escape(item["room"] or "Unspecified")}', styles['Heading2'])])
         if item['kind']=='video_frame':
@@ -897,6 +944,50 @@ elif page=='Report & Export':
             c3.metric('Not reviewed',counts.get('Not reviewed',0))
             for status,amount in sorted(counts.items()):
                 st.write(f'{status}: {amount}')
+
+            st.divider()
+            st.subheader('Inspector Summary & Follow-up')
+            st.caption('Based on saved inspector reviews. AI observations are suggestions, not official HUD/NSPIRE determinations.')
+            if inspection[0].get('notes'):
+                st.markdown('**General inspection notes**')
+                st.write(inspection[0]['notes'])
+            details = inspector_summary_details(evidence)
+            pending = [d for d in details if d['status'] in ('Not reviewed', 'Needs closer inspection')]
+            confirmed = [d for d in details if d['status'] == 'Confirmed observation']
+            rejected = [d for d in details if d['status'] in ('Rejected AI observation', 'No deficiency observed')]
+            sc1,sc2,sc3 = st.columns(3)
+            sc1.metric('Requires follow-up', len(pending))
+            sc2.metric('Confirmed by inspector', len(confirmed))
+            sc3.metric('Rejected / no deficiency', len(rejected))
+            if not details:
+                st.info('No AI-suggested observations have been recorded. This does not establish a passing inspection.')
+            else:
+                for heading, group in [
+                    ('Requires review or closer inspection', pending),
+                    ('Inspector-confirmed observations', confirmed),
+                    ('Rejected / no deficiency observed', rejected),
+                ]:
+                    st.markdown(f'#### {heading} ({len(group)})')
+                    if not group:
+                        st.caption('None recorded.')
+                    for d in group:
+                        with st.expander(f'{d["title"]} — {d["location"]} ({d["status"]})'):
+                            st.write('**Inspector determination:**', d['status'])
+                            st.write('**Field verification suggested:**', d['field_check'] or 'Not specified')
+                            st.write('**Inspector notes:**', d['notes'] or 'None saved')
+                            st.write('**Inspector-entered NSPIRE reference:**', d['reference'] or 'Not provided')
+                            st.caption(f'Evidence source: {d["source"] or "Unknown"}')
+                other = [d for d in details if d['status'] not in (
+                    'Not reviewed', 'Needs closer inspection', 'Confirmed observation',
+                    'Rejected AI observation', 'No deficiency observed')]
+                if other:
+                    st.markdown(f'#### Other determinations ({len(other)})')
+                    for d in other:
+                        st.write(f'{d["title"]} — {d["location"]}: {d["status"]}')
+            if pending:
+                st.warning('Follow-up is outstanding for one or more potential observations. Review each item in Review Findings before finalizing.')
+            st.caption('This summary reflects only the evidence and reviews saved in this app. Verify the applicable official NSPIRE standards and perform required on-site checks.')
+            st.divider()
             try:
                 package=full_inspection_backup(inspection[0],evidence)
                 st.download_button('Download complete inspection backup (ZIP with photos)',package,
