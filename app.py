@@ -34,7 +34,7 @@ DB = DATA / 'inspections.sqlite3'
 MEDIA = DATA / 'media'
 MEDIA.mkdir(exist_ok=True)
 
-st.set_page_config(page_title='HUD AI Inspector | Milestone 4', page_icon='🏠', layout='wide')
+st.set_page_config(page_title='HUD AI Inspector | Milestone 5', page_icon='🏠', layout='wide')
 st.markdown('''<style>.block-container{max-width:1100px;padding-top:1.3rem}button{min-height:2.5rem} @media(max-width:650px){.block-container{padding-left:1rem;padding-right:1rem}}</style>''', unsafe_allow_html=True)
 st.markdown("""
 <style>
@@ -581,13 +581,13 @@ def review_live_frame(frame_bytes, inspection_id, area, room, run_ai):
 
 
 st.title('🏠 HUD AI Inspector')
-st.caption('Milestone 4 • CLOUD TEST • Phone camera • AI screening • Voice • PDF summary • Temporary storage')
+st.caption('Milestone 5 • CLOUD TEST • Phone camera • AI screening • Voice • PDF summary • Temporary storage')
 st.error('CLOUD TEST ONLY: Use invented property details and synthetic/non-resident photos. Free hosting can delete saved inspections at any time. Do not upload real resident data or private inspection evidence.')
 st.warning('AI observations are not official NSPIRE findings. Confirm relevant HUD standards, perform required physical checks, and document your own determination.')
 
 with st.sidebar:
     st.header('Inspection workspace')
-    page = st.radio('Go to', ['Dashboard', 'New / Open Inspection', 'Capture & Upload', 'Live Camera Preview', 'Continuous Live Scanner', 'Review Findings', 'NSPIRE Smart Assistant', 'NSPIRE Reference Search', 'Report & Export', 'Phone Setup'], label_visibility='collapsed')
+    page = st.radio('Go to', ['Dashboard', 'New / Open Inspection', 'Capture & Upload', 'Live Camera Preview', 'Continuous Live Scanner', 'Review Findings', 'Milestone 5 Review Center', 'NSPIRE Smart Assistant', 'NSPIRE Reference Search', 'Report & Export', 'Phone Setup'], label_visibility='collapsed')
     st.caption('Single-inspector password protection is enabled. Use HTTPS and a private, secured deployment for cellular access.')
     if st.button('Sign out'):
         st.session_state['authenticated'] = False
@@ -834,6 +834,92 @@ elif page=='Review Findings':
                             reviews[str(j)]={'determination':determination,'notes':note,'reference':reference}
                             execute('UPDATE evidence SET reviewed_json=? WHERE id=?',(json.dumps(reviews),item['id']))
                             st.success('Inspector review saved.')
+
+
+elif page=='Milestone 5 Review Center':
+    st.subheader('🧭 Milestone 5 — Inspection Review Center')
+    st.caption('Organize AI-suggested observations, document inspector decisions, and export a follow-up checklist. Priority cues are for workflow only, not NSPIRE deficiency or severity classifications.')
+    if not current():
+        st.info('Open a test inspection in New / Open Inspection first.')
+    else:
+        inspection_rows=rows('SELECT * FROM inspections WHERE id=?',(current(),))
+        evidence=rows('SELECT * FROM evidence WHERE inspection_id=? ORDER BY captured_at,id',(current(),))
+        entries=[]
+        for ev in evidence:
+            try:
+                findings=json.loads(ev.get('findings_json') or '[]')
+                reviews=json.loads(ev.get('reviewed_json') or '{}')
+            except (ValueError,TypeError):
+                st.warning('One evidence record contains unreadable observation data; skipped.')
+                continue
+            if not isinstance(findings,list) or not isinstance(reviews,dict):
+                continue
+            for idx,finding in enumerate(findings):
+                if not isinstance(finding,dict):
+                    continue
+                rev=reviews.get(str(idx),{})
+                if not isinstance(rev,dict): rev={}
+                entries.append({'evidence_id':ev['id'],'index':idx,'area':ev.get('area') or '',
+                    'room':ev.get('room') or '', 'source':ev.get('source_name') or '',
+                    'title':str(finding.get('title') or 'Potential observation'),
+                    'visual_evidence':str(finding.get('visual_evidence') or ''),
+                    'field_check':str(finding.get('field_check') or ''),
+                    'determination':str(rev.get('determination') or 'Not reviewed'),
+                    'notes':str(rev.get('notes') or ''),'reference':str(rev.get('reference') or ''),
+                    'reviews':reviews})
+        pending=[e for e in entries if e['determination'] in ('Not reviewed','Needs closer inspection')]
+        confirmed=[e for e in entries if e['determination']=='Confirmed observation']
+        resolved=[e for e in entries if e['determination'] in ('Rejected AI observation','No deficiency observed')]
+        a,b,c,d=st.columns(4)
+        a.metric('Potential observations',len(entries))
+        b.metric('Follow-up pending',len(pending))
+        c.metric('Inspector confirmed',len(confirmed))
+        d.metric('Rejected / no deficiency',len(resolved))
+        if not entries:
+            st.info('No saved AI observations yet. Add synthetic evidence in Capture & Upload, then review it.')
+        else:
+            st.progress((len(entries)-len(pending))/len(entries),text=f'{len(entries)-len(pending)} of {len(entries)} observations have a completed review decision')
+            st.markdown('#### Filter and review observations')
+            f1,f2=st.columns(2)
+            statuses=['Not reviewed','Needs closer inspection','Confirmed observation','Rejected AI observation','No deficiency observed']
+            chosen=f1.multiselect('Inspector determination',statuses,default=['Not reviewed','Needs closer inspection'])
+            term=f2.text_input('Search title, location, evidence, or notes').strip().lower()
+            filtered=[e for e in entries if (not chosen or e['determination'] in chosen) and
+                      (not term or term in ' '.join(str(e.get(k,'')) for k in ('title','area','room','visual_evidence','notes')).lower())]
+            st.caption(f'{len(filtered)} observation(s) match the filters.')
+            for e in filtered:
+                key=f"m5_{e['evidence_id']}_{e['index']}"
+                with st.expander(f"{e['title']} — {e['area']} / {e['room']} ({e['determination']})"):
+                    st.write('**AI visual observation:**',e['visual_evidence'] or 'Not supplied')
+                    st.write('**Suggested on-site check:**',e['field_check'] or 'Not supplied')
+                    st.caption('Source: '+e['source'])
+                    with st.form(key):
+                        choice=st.selectbox('Inspector determination',statuses,index=statuses.index(e['determination']) if e['determination'] in statuses else 0)
+                        notes=st.text_area('Inspector notes',value=e['notes'])
+                        reference=st.text_input('Official NSPIRE reference verified by inspector (optional)',value=e['reference'])
+                        if st.form_submit_button('Save this review'):
+                            updated=dict(e['reviews'])
+                            updated[str(e['index'])]={'determination':choice,'notes':notes,'reference':reference}
+                            execute('UPDATE evidence SET reviewed_json=? WHERE id=?',(json.dumps(updated),e['evidence_id']))
+                            st.success('Review saved.')
+                            st.rerun()
+            st.divider()
+            st.markdown('#### Follow-up checklist')
+            if pending:
+                for e in pending:
+                    st.checkbox(f"{e['title']} — {e['area']} / {e['room']} ({e['determination']})",key=f"check_{e['evidence_id']}_{e['index']}",help='Temporary checklist only. Save the official inspector determination in the review form above.')
+            else:
+                st.success('No AI-suggested observations are currently awaiting a review decision. This does not establish NSPIRE compliance.')
+            import csv
+            csv_buffer=io.StringIO()
+            writer=csv.writer(csv_buffer)
+            writer.writerow(['Property','Unit','Location','Potential observation','AI visual evidence','On-site verification','Inspector determination','Inspector notes','Inspector-verified reference','Source'])
+            prop=inspection_rows[0].get('property','') if inspection_rows else ''
+            unit=inspection_rows[0].get('unit','') if inspection_rows else ''
+            for e in entries:
+                writer.writerow([prop,unit,' / '.join((e['area'],e['room'])),e['title'],e['visual_evidence'],e['field_check'],e['determination'],e['notes'],e['reference'],e['source']])
+            st.download_button('Download complete review checklist (CSV)',csv_buffer.getvalue().encode('utf-8-sig'),file_name='HUD_AI_Inspector_M5_Review_Checklist.csv',mime='text/csv',use_container_width=True)
+            st.info('The CSV is a working review checklist, not an official HUD inspection report. Use Report & Export for the existing PDF and complete ZIP backup.')
 
 elif page=='NSPIRE Smart Assistant':
     st.subheader('🎙️ NSPIRE Smart Assistant')
