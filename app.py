@@ -1,4 +1,4 @@
-"""HUD AI Inspector Milestone 4 — cloud TEST deployment (synthetic data only)."""
+"""HUD AI Inspector Milestones 1–10 — cloud TEST deployment (synthetic data only)."""
 import base64
 import zipfile
 from collections import Counter
@@ -34,7 +34,7 @@ DB = DATA / 'inspections.sqlite3'
 MEDIA = DATA / 'media'
 MEDIA.mkdir(exist_ok=True)
 
-st.set_page_config(page_title='HUD AI Inspector | Milestone 5', page_icon='🏠', layout='wide')
+st.set_page_config(page_title='HUD AI Inspector | Milestone 10', page_icon='🏠', layout='wide')
 st.markdown('''<style>.block-container{max-width:1100px;padding-top:1.3rem}button{min-height:2.5rem} @media(max-width:650px){.block-container{padding-left:1rem;padding-right:1rem}}</style>''', unsafe_allow_html=True)
 st.markdown("""
 <style>
@@ -75,6 +75,7 @@ def db():
     connection.row_factory = sqlite3.Row
     connection.execute('PRAGMA foreign_keys=ON')
     connection.execute('''CREATE TABLE IF NOT EXISTS inspections (id TEXT PRIMARY KEY, property TEXT NOT NULL, address TEXT, unit TEXT, inspector TEXT, inspected_on TEXT, notes TEXT, created_at TEXT)''')
+    connection.execute('''CREATE TABLE IF NOT EXISTS audit_events (id TEXT PRIMARY KEY, inspection_id TEXT, event TEXT, occurred_at TEXT)''')
     connection.execute('''CREATE TABLE IF NOT EXISTS evidence (id TEXT PRIMARY KEY, inspection_id TEXT NOT NULL REFERENCES inspections(id), area TEXT, room TEXT, kind TEXT, path TEXT, source_name TEXT, captured_at TEXT, findings_json TEXT, reviewed_json TEXT)''')
     connection.commit()
     return connection
@@ -88,6 +89,13 @@ def rows(sql, args=()):
 def execute(sql, args):
     with db() as c:
         c.execute(sql, args)
+        # Milestone 7: record only the event type and record ID, never review text.
+        if sql.lstrip().upper().startswith('UPDATE EVIDENCE SET REVIEWED_JSON') and len(args) >= 2:
+            evidence_id = str(args[-1])
+            record = c.execute('SELECT inspection_id FROM evidence WHERE id=?', (evidence_id,)).fetchone()
+            if record:
+                c.execute('INSERT INTO audit_events VALUES (?,?,?,?)',
+                          (str(uuid.uuid4()), record['inspection_id'], 'Inspector review saved: evidence ' + evidence_id[:12], datetime.utcnow().isoformat() + 'Z'))
         c.commit()
 
 def restore_inspection_backup(uploaded_file):
@@ -402,6 +410,120 @@ def inspector_summary_details(evidence):
     return details
 
 
+
+
+def inspection_quality_checks(inspection, evidence):
+    """Read-only completeness checks; NOT HUD/NSPIRE compliance testing."""
+    checks = []
+    def add(category, status, detail):
+        checks.append({'category': category, 'status': status, 'detail': detail})
+
+    for label, key in [('Property / building', 'property'), ('Inspector name', 'inspector'),
+                       ('Inspection date', 'inspected_on')]:
+        if not str(inspection.get(key) or '').strip():
+            add('Inspection details', 'Needs attention', f'{label} is missing.')
+    if not str(inspection.get('unit') or '').strip():
+        add('Inspection details', 'Review', 'Unit is blank; confirm whether a unit applies.')
+    if not evidence:
+        add('Evidence', 'Needs attention', 'No evidence images or frames are saved.')
+    for item in evidence:
+        name = Path(item.get('path') or '').name
+        if not name or not (MEDIA / name).is_file():
+            add('Evidence', 'Needs attention', f'Missing evidence file for record {item.get("id", "unknown")}.')
+        try:
+            findings = json.loads(item.get('findings_json') or '[]')
+            reviews = json.loads(item.get('reviewed_json') or '{}')
+            if not isinstance(findings, list) or not isinstance(reviews, dict):
+                raise ValueError('Incorrect finding/review structure')
+        except (ValueError, TypeError):
+            add('Observation records', 'Needs attention', f'Unreadable review data in evidence {item.get("id", "unknown")}.')
+            continue
+        for idx, finding in enumerate(findings):
+            if not isinstance(finding, dict):
+                add('Observation records', 'Needs attention', f'Invalid observation {idx + 1} in evidence {item.get("id", "unknown")}.')
+                continue
+            review = reviews.get(str(idx), {})
+            if not isinstance(review, dict):
+                review = {}
+            title = str(finding.get('title') or f'Observation {idx + 1}')
+            determination = str(review.get('determination') or 'Not reviewed')
+            if determination in ('Not reviewed', 'Needs closer inspection'):
+                add('Inspector review', 'Needs attention', f'{title}: {determination}.')
+            elif not str(review.get('notes') or '').strip():
+                add('Inspector documentation', 'Review', f'{title}: final decision has no inspector notes.')
+            if determination == 'Confirmed observation' and not str(review.get('reference') or '').strip():
+                add('Reference verification', 'Review', f'{title}: confirmed observation has no inspector-entered NSPIRE reference.')
+    if not checks:
+        add('Completeness', 'No issues flagged', 'No missing fields or pending reviews detected by these limited checks.')
+    return checks
+
+
+def quality_checks_csv(inspection, checks):
+    import csv
+    buffer = io.StringIO()
+    writer = csv.writer(buffer)
+    writer.writerow(['Inspection ID', 'Property', 'Category', 'Status', 'Detail'])
+    for check in checks:
+        writer.writerow([inspection.get('id', ''), inspection.get('property', ''),
+                         check['category'], check['status'], check['detail']])
+    return buffer.getvalue().encode('utf-8-sig')
+
+
+
+def validate_backup_read_only(upload):
+    """Read-only bounded structural validation; does not import or trust backup content."""
+    import stat
+    if upload.size > 100 * 1024 * 1024:
+        raise ValueError('Backup exceeds 100 MB limit.')
+    with zipfile.ZipFile(io.BytesIO(upload.getvalue())) as z:
+        members = z.infolist()
+        if len(members) > 500 or sum(m.file_size for m in members) > 250 * 1024 * 1024:
+            raise ValueError('Archive exceeds entry count or uncompressed size limits.')
+        names = [m.filename for m in members]
+        if len(names) != len(set(names)) or 'inspection.json' not in names:
+            raise ValueError('Duplicate paths or missing inspection.json.')
+        for m in members:
+            name = m.filename
+            if m.flag_bits & 1 or stat.S_ISLNK(m.external_attr >> 16):
+                raise ValueError('Encrypted or symlink entries are not supported.')
+            if name != 'inspection.json' and (not name.startswith('media/') or len(name.split('/')) != 2 or '..' in name or '\\' in name or m.is_dir()):
+                raise ValueError('Unexpected media path in archive.')
+            if m.file_size > (5 if name == 'inspection.json' else 25) * 1024 * 1024:
+                raise ValueError('Oversized archive member.')
+        meta = json.loads(z.read('inspection.json'))
+        if meta.get('format') != 'HUD_AI_INSPECTOR_M4_PORTABLE_BACKUP':
+            raise ValueError('Unsupported backup format.')
+        if not isinstance(meta.get('inspection'), dict) or not isinstance(meta.get('evidence'), list):
+            raise ValueError('Invalid backup metadata.')
+        if len(meta['evidence']) > 499:
+            raise ValueError('Too many evidence records.')
+        for m in members:
+            with z.open(m) as f:
+                while f.read(1024 * 1024):
+                    pass  # Read every entry to detect corrupted CRC data.
+        return {'media_files': sum(n.startswith('media/') for n in names),
+                'evidence_records': len(meta['evidence']), 'property': str(meta['inspection'].get('property', ''))[:100]}
+
+
+def test_plan_csv():
+    import csv
+    b = io.StringIO()
+    w = csv.writer(b)
+    w.writerow(['Milestone', 'Test', 'Expected result', 'Pass / Fail', 'Notes'])
+    for row in [
+        (1, 'Create and reopen synthetic inspection', 'Inspection reopens with correct metadata'),
+        (2, 'Upload synthetic photo', 'Evidence image appears'),
+        (3, 'Optional AI screening', 'Suggestions appear or helpful configuration warning'),
+        (4, 'Camera preview and sampled scanner', 'Camera permissions and frames work on supported browser'),
+        (5, 'Review and report', 'Decisions saved; PDF and ZIP downloadable'),
+        (6, 'Quality Check', 'Outstanding review and evidence gaps flagged'),
+        (7, 'Audit Trail', 'Review save creates dated event'),
+        (8, 'Backup Validator', 'Exported ZIP validates without restoring'),
+        (9, 'Security Readiness', 'Security limitations displayed accurately'),
+        (10, 'End-to-end test', 'Export, restore and compare with synthetic test data')]:
+        w.writerow([*row, '', ''])
+    return b.getvalue().encode('utf-8-sig')
+
 def full_inspection_backup(inspection,evidence):
     """Portable ZIP with metadata and images, no passwords/API keys."""
     output=io.BytesIO()
@@ -581,13 +703,13 @@ def review_live_frame(frame_bytes, inspection_id, area, room, run_ai):
 
 
 st.title('🏠 HUD AI Inspector')
-st.caption('Milestone 5 • CLOUD TEST • Phone camera • AI screening • Voice • PDF summary • Temporary storage')
+st.caption('Milestones 1–10 • CLOUD TEST • Phone camera • AI screening • Voice • PDF summary • Temporary storage')
 st.error('CLOUD TEST ONLY: Use invented property details and synthetic/non-resident photos. Free hosting can delete saved inspections at any time. Do not upload real resident data or private inspection evidence.')
 st.warning('AI observations are not official NSPIRE findings. Confirm relevant HUD standards, perform required physical checks, and document your own determination.')
 
 with st.sidebar:
     st.header('Inspection workspace')
-    page = st.radio('Go to', ['Dashboard', 'New / Open Inspection', 'Capture & Upload', 'Live Camera Preview', 'Continuous Live Scanner', 'Review Findings', 'Milestone 5 Review Center', 'NSPIRE Smart Assistant', 'NSPIRE Reference Search', 'Report & Export', 'Phone Setup'], label_visibility='collapsed')
+    page = st.radio('Go to', ['Dashboard', 'New / Open Inspection', 'Capture & Upload', 'Live Camera Preview', 'Continuous Live Scanner', 'Review Findings', 'Milestone 6 Review Center', 'Milestone 6 Quality Check', 'Milestone 7 Audit Trail', 'Milestone 8 Backup Validator', 'Milestone 9 Security Readiness', 'Milestone 10 Test Center', 'NSPIRE Smart Assistant', 'NSPIRE Reference Search', 'Report & Export', 'Phone Setup'], label_visibility='collapsed')
     st.caption('Single-inspector password protection is enabled. Use HTTPS and a private, secured deployment for cellular access.')
     if st.button('Sign out'):
         st.session_state['authenticated'] = False
@@ -836,8 +958,8 @@ elif page=='Review Findings':
                             st.success('Inspector review saved.')
 
 
-elif page=='Milestone 5 Review Center':
-    st.subheader('🧭 Milestone 5 — Inspection Review Center')
+elif page=='Milestone 6 Review Center':
+    st.subheader('🧭 Milestone 6 — Inspection Review Center')
     st.caption('Organize AI-suggested observations, document inspector decisions, and export a follow-up checklist. Priority cues are for workflow only, not NSPIRE deficiency or severity classifications.')
     if not current():
         st.info('Open a test inspection in New / Open Inspection first.')
@@ -920,6 +1042,106 @@ elif page=='Milestone 5 Review Center':
                 writer.writerow([prop,unit,' / '.join((e['area'],e['room'])),e['title'],e['visual_evidence'],e['field_check'],e['determination'],e['notes'],e['reference'],e['source']])
             st.download_button('Download complete review checklist (CSV)',csv_buffer.getvalue().encode('utf-8-sig'),file_name='HUD_AI_Inspector_M5_Review_Checklist.csv',mime='text/csv',use_container_width=True)
             st.info('The CSV is a working review checklist, not an official HUD inspection report. Use Report & Export for the existing PDF and complete ZIP backup.')
+
+elif page=='Milestone 6 Quality Check':
+    st.subheader('🧾 Milestone 6 — Inspection Quality Check Center')
+    st.caption('A read-only completeness check for the saved inspection. This is not a HUD/NSPIRE compliance determination, official inspection, or severity assessment.')
+    if not current():
+        st.info('Open a test inspection in New / Open Inspection first.')
+    else:
+        selected=rows('SELECT * FROM inspections WHERE id=?',(current(),))
+        if not selected:
+            st.warning('Selected inspection was not found. Reopen an inspection.')
+        else:
+            inspection=selected[0]
+            evidence=rows('SELECT * FROM evidence WHERE inspection_id=? ORDER BY captured_at,id',(current(),))
+            checks=inspection_quality_checks(inspection,evidence)
+            urgent=sum(c['status']=='Needs attention' for c in checks)
+            review=sum(c['status']=='Review' for c in checks)
+            a,b,c=st.columns(3)
+            a.metric('Needs attention',urgent)
+            b.metric('Review recommended',review)
+            c.metric('Evidence records',len(evidence))
+            if urgent:
+                st.warning('This inspection has incomplete records or outstanding inspector review decisions.')
+            else:
+                st.info('No blocking completeness issues detected by these limited checks. This does not establish HUD/NSPIRE compliance.')
+            st.markdown('#### Quality check results')
+            for item in checks:
+                with st.expander(f"{item['status']} — {item['category']}"):
+                    st.write(item['detail'])
+            st.download_button('Download quality check checklist (CSV)',
+                               quality_checks_csv(inspection,checks),
+                               file_name='HUD_AI_Inspector_M6_Quality_Check.csv',
+                               mime='text/csv',use_container_width=True)
+            st.caption('Use Milestone 5 Review Center to finish reviews, and Report & Export for PDF and full ZIP backups. These checks do not replace physical inspection or review of official standards.')
+
+
+elif page=='Milestone 7 Audit Trail':
+    st.subheader('📋 Milestone 7 — Inspector Review Audit Trail')
+    st.caption('Records new review-save events in this installation. This is a basic activity log, not a tamper-proof or legally certified audit trail. Older actions are not backfilled.')
+    if not current():
+        st.info('Open a synthetic inspection first.')
+    else:
+        events=rows('SELECT occurred_at,event FROM audit_events WHERE inspection_id=? ORDER BY occurred_at DESC LIMIT 500',(current(),))
+        st.metric('Recorded review events',len(events))
+        if events:
+            st.dataframe(events,use_container_width=True)
+            import csv
+            b=io.StringIO(); w=csv.writer(b); w.writerow(['UTC time','Event'])
+            for e in events: w.writerow([e['occurred_at'],e['event']])
+            st.download_button('Download activity log (CSV)',b.getvalue().encode('utf-8-sig'),file_name='M7_Review_Audit_Log.csv',mime='text/csv')
+        else:
+            st.info('No review-save events recorded yet. Save a review to test this feature.')
+
+elif page=='Milestone 8 Backup Validator':
+    st.subheader('🗃️ Milestone 8 — Backup Integrity Validator')
+    st.caption('Checks the structure and ZIP integrity of a downloaded inspection backup without importing or modifying any inspection.')
+    uploaded_backup=st.file_uploader('Choose a synthetic inspection ZIP backup',type=['zip'],key='m8_backup')
+    if uploaded_backup and st.button('Validate backup without restoring'):
+        try:
+            result=validate_backup_read_only(uploaded_backup)
+            st.success('ZIP structure and member CRC checks passed. This does not guarantee a successful restore or data completeness.')
+            st.write('Evidence records:',result['evidence_records'])
+            st.write('Media files:',result['media_files'])
+            st.write('Inspection property:',result['property'])
+        except Exception as exc:
+            st.error(f'Backup validation failed: {exc}')
+
+elif page=='Milestone 9 Security Readiness':
+    st.subheader('🔐 Milestone 9 — Security and Deployment Readiness')
+    st.error('NOT PRODUCTION READY: free cloud deployment and shared-password access are not appropriate for resident/private inspection evidence.')
+    st.caption('This page is a planning checklist, not a security certification or penetration test.')
+    requirements=[
+        'Private deployment with authenticated individual inspector accounts and authorization',
+        'Encryption in transit and encrypted durable storage with managed keys',
+        'Managed database and secure, verified off-site backups with tested restores',
+        'Data retention and deletion rules, access logging, and incident response plan',
+        'Privacy/legal review and appropriate agreements before processing resident data',
+        'Validated NSPIRE publication versions and human inspector sign-off',
+        'Mobile browser camera, accessibility, and offline-connectivity testing',
+    ]
+    for idx,requirement in enumerate(requirements):
+        st.checkbox(requirement,key=f'm9_plan_{idx}',help='Planning acknowledgement only; checking this does not implement the control.')
+    st.warning('Checking items here does not change application security. Continue using invented details and synthetic/non-resident photos only.')
+
+elif page=='Milestone 10 Test Center':
+    st.subheader('🧪 Milestone 10 — End-to-End Test Center')
+    st.caption('Download a structured manual acceptance test plan for Milestones 1–10. This page does not claim the tests have passed.')
+    st.download_button('Download full test plan (CSV)',test_plan_csv(),file_name='HUD_AI_Inspector_M1_to_M10_Test_Plan.csv',mime='text/csv',use_container_width=True)
+    st.markdown('#### Current inspection preflight')
+    if not current():
+        st.info('Open or restore a synthetic inspection to run preflight checks.')
+    else:
+        found=rows('SELECT * FROM inspections WHERE id=?',(current(),))
+        if found:
+            ev=rows('SELECT * FROM evidence WHERE inspection_id=?',(current(),))
+            checks=inspection_quality_checks(found[0],ev)
+            st.metric('Evidence records',len(ev))
+            st.metric('Attention flags',sum(x['status']=='Needs attention' for x in checks))
+            st.metric('Review suggestions',sum(x['status']=='Review' for x in checks))
+            for check in checks: st.write(f"{check['status']}: {check['detail']}")
+    st.info('Recommended manual flow: create → capture → review → quality check → PDF/ZIP export → ZIP validate → restore → compare. AI results require inspector verification.')
 
 elif page=='NSPIRE Smart Assistant':
     st.subheader('🎙️ NSPIRE Smart Assistant')
