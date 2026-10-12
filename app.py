@@ -102,29 +102,34 @@ def restore_browser_session():
     st.session_state["authenticated"] = True
     return True
 
-def save_browser_session(sb, uid):
+def prepare_browser_session(sb, uid):
+    """Create a server-side session handle; do not render a cookie component here.
+
+    The login form run has already called CookieManager.get(), so calling
+    CookieManager.set() in that same run triggers StreamlitDuplicateElementKey.
+    """
     token = secrets.token_urlsafe(32)
     expiration = datetime.now(timezone.utc) + timedelta(hours=SESSION_HOURS)
     store = login_session_store()
     with store["lock"]:
-        for k, rec in list(store["entries"].items()):
-            if datetime.now(timezone.utc) >= rec["expires"]:
-                store["entries"].pop(k, None)
+        for old_token, record in list(store["entries"].items()):
+            if datetime.now(timezone.utc) >= record["expires"]:
+                store["entries"].pop(old_token, None)
         store["entries"][token] = {"client": sb, "user_id": uid, "expires": expiration}
     st.session_state["hud_browser_cookie"] = token
-    # Cookie expiration is a fallback timeout. Some browsers restore cookies
-    # when reopening; closing a browser is NOT a guaranteed logout.
-    browser_cookie_manager().set(SESSION_COOKIE, token, expires_at=expiration)
+    st.session_state["hud_cookie_expires"] = expiration
+    st.session_state["hud_login_pending"] = True
+
 
 def sign_out_browser_session():
+    """Revoke the server handle and remove the browser cookie on sign-out."""
     token = st.session_state.get("hud_browser_cookie")
-    if not token:
-        token = browser_cookie_manager().get(SESSION_COOKIE)
     if token:
         store = login_session_store()
         with store["lock"]:
             store["entries"].pop(token, None)
     try:
+        # Only delete here: never call get() and delete() in the same run.
         browser_cookie_manager().delete(SESSION_COOKIE)
     except Exception:
         pass
@@ -134,16 +139,41 @@ def sign_out_browser_session():
             sb.auth.sign_out()
         except Exception:
             pass
-    for key in ("authenticated", "sb_client", "auth_user", "inspection_id", "hud_browser_cookie"):
+    for key in ("authenticated", "sb_client", "auth_user", "inspection_id",
+                "hud_browser_cookie", "hud_cookie_expires", "hud_login_pending",
+                "hud_cookie_error"):
         st.session_state.pop(key, None)
 
 
 def require_login():
-    """Supabase login using a private username-to-email mapping."""
+    """Supabase login with a separate Streamlit run for each cookie operation."""
     url = config("SUPABASE_URL")
     key = config("SUPABASE_PUBLISHABLE_KEY")
     if not url or not key:
         st.error("Set SUPABASE_URL and SUPABASE_PUBLISHABLE_KEY in Streamlit secrets.")
+        st.stop()
+
+    # Phase 2: This run only SETS the cookie. It does not call get().
+    # Keep the component mounted until the user clicks Continue so the browser
+    # has an opportunity to process its asynchronous cookie write.
+    if st.session_state.get("hud_login_pending"):
+        st.title("🔒 HUD AI Inspector — Finishing sign in")
+        token = st.session_state.get("hud_browser_cookie")
+        expires = st.session_state.get("hud_cookie_expires")
+        if not token or not expires:
+            st.error("Login session could not be prepared. Please sign in again.")
+            st.stop()
+        try:
+            browser_cookie_manager().set(SESSION_COOKIE, token, expires_at=expires)
+        except Exception as exc:
+            st.error(f"Browser session could not be saved ({type(exc).__name__}).")
+            st.info("Please report the error type; do not share any cookie values or tokens.")
+            st.stop()
+        st.success("Signed in. Allow a moment for the browser session to save.")
+        if st.button("Continue to dashboard", use_container_width=True):
+            st.session_state.pop("hud_login_pending", None)
+            st.session_state.pop("hud_cookie_expires", None)
+            st.rerun()
         st.stop()
 
     if st.session_state.get("auth_user") and st.session_state.get("sb_client"):
@@ -155,7 +185,10 @@ def require_login():
         except Exception:
             pass
         sign_out_browser_session()
+        st.rerun()  # Avoid delete() followed by get() in one Streamlit run.
 
+    # Phase 1: This run only GETS the cookie. Successful login schedules the
+    # separate cookie-writing run rather than calling set() here.
     if restore_browser_session():
         return
 
@@ -183,33 +216,12 @@ def require_login():
             st.session_state["sb_client"] = sb
             st.session_state["auth_user"] = result.user.id
             st.session_state["authenticated"] = True
-            try:
-                save_browser_session(sb, result.user.id)
-            except Exception as exc:
-                # Show the exception class and a bounded diagnostic message,
-                # without printing tokens, cookie contents or credentials.
-                st.session_state["hud_cookie_error"] = type(exc).__name__
-                st.warning(
-                    "Signed in, but browser session persistence failed "
-                    f"({type(exc).__name__}). Please report this error type."
-                )
-            # CookieManager writes through a browser component asynchronously.
-            # Do not rerun immediately: the component needs a rendered cycle to
-            # deliver its cookie write to the browser.
-            st.session_state["hud_login_pending"] = True
-            st.success("Signed in. Click Continue to open the dashboard.")
+            prepare_browser_session(sb, result.user.id)
+            st.rerun()
         except Exception:
             st.error("Sign in failed. Check your username and password.")
-
-    if st.session_state.get("hud_login_pending"):
-        if st.session_state.get("hud_cookie_error"):
-            st.info("Login succeeded, but refresh persistence is not working yet. Continue to test the dashboard.")
-        else:
-            st.info("Your browser is saving the login session. Wait a moment, then continue.")
-        if st.button("Continue to dashboard", use_container_width=True):
-            st.session_state.pop("hud_login_pending", None)
-            st.rerun()
     st.stop()
+
 
 require_login()
 
