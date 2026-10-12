@@ -782,29 +782,93 @@ def review_live_frame(frame_bytes, inspection_id, area, room, run_ai):
     return eid, 'Frame saved for inspector review.', 0
 
 
+# Field-friendly navigation: the original pages and database behavior are retained.
+FIELD_PAGES = {
+    "Home": "Dashboard",
+    "Inspections": "New / Open Inspection",
+    "Capture photos & video": "Capture & Upload",
+    "Review observations": "Review Findings",
+    "Generate report": "Report & Export",
+}
+FIELD_TOOLS = {
+    "Live camera preview": "Live Camera Preview",
+    "Continuous camera scanner": "Continuous Live Scanner",
+    "Review center": "Milestone 6 Review Center",
+    "Quality check": "Milestone 6 Quality Check",
+    "Inspection audit trail": "Milestone 7 Audit Trail",
+    "Validate backup": "Milestone 8 Backup Validator",
+    "Security readiness": "Milestone 9 Security Readiness",
+    "Test center": "Milestone 10 Test Center",
+    "NSPIRE assistant": "NSPIRE Smart Assistant",
+    "NSPIRE reference search": "NSPIRE Reference Search",
+    "Phone setup": "Phone Setup",
+}
+
+def open_field_page(destination):
+    st.session_state["hud_active_page"] = destination
+
+st.markdown("""<style>
+[data-testid="stSidebar"] {min-width: 265px;}
+div.stButton > button {border-radius: 10px;}
+[data-testid="stMetric"] {padding: .6rem .9rem; border: 1px solid rgba(128,128,128,.18); border-radius: 12px;}
+</style>""", unsafe_allow_html=True)
 st.title('🏠 HUD AI Inspector')
-st.caption('Milestones 1–10 • CLOUD TEST • Phone camera • AI screening • Voice • PDF summary • Supabase development storage')
-st.error('CLOUD TEST ONLY: Use invented property details and synthetic/non-resident photos. Cloud storage is under development and is not approved for real resident records. Do not upload real resident data or private inspection evidence.')
-st.warning('AI observations are not official NSPIRE findings. Confirm relevant HUD standards, perform required physical checks, and document your own determination.')
+st.caption('Field inspection workspace • Development test environment')
+st.error('DEVELOPMENT TEST ONLY — Use invented property details and synthetic/non-resident photos. Do not upload real resident data or private inspection evidence.')
+st.caption('AI visual suggestions are not official HUD/NSPIRE findings. Verify conditions and applicable standards in person.')
+
+if "hud_active_page" not in st.session_state:
+    st.session_state["hud_active_page"] = "Dashboard"
 
 with st.sidebar:
     st.header('Inspection workspace')
-    page = st.radio('Go to', ['Dashboard', 'New / Open Inspection', 'Capture & Upload', 'Live Camera Preview', 'Continuous Live Scanner', 'Review Findings', 'Milestone 6 Review Center', 'Milestone 6 Quality Check', 'Milestone 7 Audit Trail', 'Milestone 8 Backup Validator', 'Milestone 9 Security Readiness', 'Milestone 10 Test Center', 'NSPIRE Smart Assistant', 'NSPIRE Reference Search', 'Report & Export', 'Phone Setup'], label_visibility='collapsed')
-    st.caption('Supabase test-account authentication is enabled. Synthetic data only.')
-    if st.button('Sign out'):
+    st.caption('Choose your task')
+    for label, destination in FIELD_PAGES.items():
+        is_active = st.session_state["hud_active_page"] == destination
+        if st.button(("● " if is_active else "") + label, key="nav_" + destination,
+                     use_container_width=True, type="primary" if is_active else "secondary"):
+            open_field_page(destination)
+            st.rerun()
+    with st.expander('More tools & settings'):
+        for label, destination in FIELD_TOOLS.items():
+            if st.button(label, key="tool_" + destination, use_container_width=True):
+                open_field_page(destination)
+                st.rerun()
+    st.divider()
+    st.caption('Supabase development account • Synthetic test data only')
+    if st.button('Sign out', use_container_width=True):
         sign_out_browser_session()
         st.rerun()
 
+page = st.session_state["hud_active_page"]
+
 if page=='Dashboard':
+    st.subheader('Welcome to your inspection workspace')
+    st.write('Start a new inspection, collect evidence, review observations, and export a report.')
     items=rows('SELECT * FROM inspections ORDER BY created_at DESC')
-    c1,c2=st.columns(2)
-    c1.metric('Saved inspections',len(items))
-    c2.metric('Evidence images / frames',len(rows('SELECT id FROM evidence')))
-    st.subheader('Inspection history')
+    a,b=st.columns(2)
+    a.metric('Saved inspections',len(items))
+    b.metric('Evidence photos / frames',len(rows('SELECT id FROM evidence')))
+    st.markdown('#### Inspection workflow')
+    action_labels = [
+        ('1. Create or open inspection', 'New / Open Inspection'),
+        ('2. Capture photos or video', 'Capture & Upload'),
+        ('3. Review AI observations', 'Review Findings'),
+        ('4. Check inspection quality', 'Milestone 6 Quality Check'),
+        ('5. Generate PDF report', 'Report & Export'),
+    ]
+    for label, destination in action_labels:
+        if st.button(label, key='home_'+destination, use_container_width=True):
+            open_field_page(destination)
+            st.rerun()
+    st.markdown('#### Recent inspections')
     if items:
-        st.dataframe([{'Property':x['property'],'Unit':x['unit'],'Date':x['inspected_on'],'Inspector':x['inspector'],'ID':x['id']} for x in items],hide_index=True,use_container_width=True)
+        st.dataframe([{'Property':x['property'],'Unit':x['unit'],
+                       'Date':x['inspected_on'],'Inspector':x['inspector']}
+                      for x in items[:15]], hide_index=True, use_container_width=True)
+        st.caption('Open an existing inspection from the Inspections menu.')
     else:
-        st.info('Create an inspection to begin.')
+        st.info('No inspections yet. Select “1. Create or open inspection” to begin using synthetic test data.')
 
 elif page=='New / Open Inspection':
     st.subheader('Create inspection')
@@ -823,7 +887,7 @@ elif page=='New / Open Inspection':
             iid=str(uuid.uuid4())
             execute('INSERT INTO inspections VALUES (?,?,?,?,?,?,?,?)',(iid,property_name.strip(),address,unit,inspector,day.isoformat(),notes,datetime.now().isoformat(timespec='seconds')))
             st.session_state['inspection_id']=iid
-            st.success('Inspection created. Open Capture & Upload to add evidence.')
+            st.success('Inspection created and selected. Choose Capture photos & video from the sidebar to add evidence.')
     items=rows('SELECT * FROM inspections ORDER BY created_at DESC')
     if items:
         choices={f"{x['property']} | Unit {x['unit']} | {x['inspected_on']} | {x['id'][:8]}":x['id'] for x in items}
