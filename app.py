@@ -846,6 +846,15 @@ h1, h2, h3 {color: #243449 !important; letter-spacing: -.018em;}
 .stDownloadButton > button[kind="secondary"]:hover {background: #E8F3FE !important; border-color: #78B5E8 !important;}
 .stButton > button:focus-visible, .stFormSubmitButton > button:focus-visible,
 .stDownloadButton > button:focus-visible {outline: 3px solid #7CB6EA !important; outline-offset: 2px !important;}
+/* Thin, crisp near-black outlines on all Streamlit action buttons. */
+.stButton > button, .stFormSubmitButton > button,
+.stDownloadButton > button, .stLinkButton > a {
+    border: 1px solid #29313B !important;
+}
+.stButton > button:hover, .stFormSubmitButton > button:hover,
+.stDownloadButton > button:hover, .stLinkButton > a:hover {
+    border-color: #29313B !important;
+}
 /* Soft cards and form controls */
 [data-testid="stMetric"] {background: #FFFFFF !important; border: 1px solid #DBE6F0 !important;
     border-radius: 16px !important; box-shadow: 0 3px 14px rgba(35,75,110,.05) !important; padding: 1rem !important;}
