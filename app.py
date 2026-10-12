@@ -185,8 +185,14 @@ def require_login():
             st.session_state["authenticated"] = True
             try:
                 save_browser_session(sb, result.user.id)
-            except Exception:
-                st.warning("Signed in, but browser session persistence is unavailable.")
+            except Exception as exc:
+                # Show the exception class and a bounded diagnostic message,
+                # without printing tokens, cookie contents or credentials.
+                st.session_state["hud_cookie_error"] = type(exc).__name__
+                st.warning(
+                    "Signed in, but browser session persistence failed "
+                    f"({type(exc).__name__}). Please report this error type."
+                )
             # CookieManager writes through a browser component asynchronously.
             # Do not rerun immediately: the component needs a rendered cycle to
             # deliver its cookie write to the browser.
@@ -196,7 +202,10 @@ def require_login():
             st.error("Sign in failed. Check your username and password.")
 
     if st.session_state.get("hud_login_pending"):
-        st.info("Your browser is saving the login session. Wait a moment, then continue.")
+        if st.session_state.get("hud_cookie_error"):
+            st.info("Login succeeded, but refresh persistence is not working yet. Continue to test the dashboard.")
+        else:
+            st.info("Your browser is saving the login session. Wait a moment, then continue.")
         if st.button("Continue to dashboard", use_container_width=True):
             st.session_state.pop("hud_login_pending", None)
             st.rerun()
