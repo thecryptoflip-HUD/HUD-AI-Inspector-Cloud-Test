@@ -14,7 +14,8 @@ import tempfile
 import uuid
 import time
 import threading
-from datetime import datetime, date
+import secrets
+from datetime import datetime, date, timedelta, timezone
 from html import escape
 from pathlib import Path
 
@@ -46,6 +47,7 @@ html, body {
 """, unsafe_allow_html=True)
 
 from supabase import create_client
+import extra_streamlit_components as stx
 
 BUCKET = "inspection-evidence"
 
@@ -58,10 +60,85 @@ def config(name, default=""):
     except Exception:
         return default
 
+# A random, opaque browser cookie points to an in-memory authenticated Supabase
+# client. Passwords, API keys and Supabase tokens are never placed in the cookie.
+# This is a development-only session bridge, not a durable session database.
+SESSION_COOKIE = "hud_dev_session_v1"
+SESSION_HOURS = 8
+
+@st.cache_resource(show_spinner=False)
+def login_session_store():
+    return {"lock": threading.RLock(), "entries": {}}
+
+def browser_cookie_manager():
+    return stx.CookieManager(key="hud_dev_cookie_manager")
+
+def restore_browser_session():
+    manager = browser_cookie_manager()
+    cookie = manager.get(SESSION_COOKIE)
+    if not isinstance(cookie, str) or not re.fullmatch(r"[A-Za-z0-9_-]{32,128}", cookie):
+        return False
+    store = login_session_store()
+    with store["lock"]:
+        record = store["entries"].get(cookie)
+        if not record:
+            return False
+        if datetime.now(timezone.utc) >= record["expires"]:
+            store["entries"].pop(cookie, None)
+            return False
+        sb = record["client"]
+        uid = record["user_id"]
+    try:
+        session = sb.auth.get_session()
+        if not session or not session.user or session.user.id != uid:
+            raise ValueError("Expired session")
+    except Exception:
+        with store["lock"]:
+            store["entries"].pop(cookie, None)
+        return False
+    st.session_state["sb_client"] = sb
+    st.session_state["auth_user"] = uid
+    st.session_state["hud_browser_cookie"] = cookie
+    st.session_state["authenticated"] = True
+    return True
+
+def save_browser_session(sb, uid):
+    token = secrets.token_urlsafe(32)
+    expiration = datetime.now(timezone.utc) + timedelta(hours=SESSION_HOURS)
+    store = login_session_store()
+    with store["lock"]:
+        for k, rec in list(store["entries"].items()):
+            if datetime.now(timezone.utc) >= rec["expires"]:
+                store["entries"].pop(k, None)
+        store["entries"][token] = {"client": sb, "user_id": uid, "expires": expiration}
+    st.session_state["hud_browser_cookie"] = token
+    # Cookie expiration is a fallback timeout. Some browsers restore cookies
+    # when reopening; closing a browser is NOT a guaranteed logout.
+    browser_cookie_manager().set(SESSION_COOKIE, token, expires_at=expiration)
+
+def sign_out_browser_session():
+    token = st.session_state.get("hud_browser_cookie")
+    if not token:
+        token = browser_cookie_manager().get(SESSION_COOKIE)
+    if token:
+        store = login_session_store()
+        with store["lock"]:
+            store["entries"].pop(token, None)
+    try:
+        browser_cookie_manager().delete(SESSION_COOKIE)
+    except Exception:
+        pass
+    sb = st.session_state.get("sb_client")
+    if sb:
+        try:
+            sb.auth.sign_out()
+        except Exception:
+            pass
+    for key in ("authenticated", "sb_client", "auth_user", "inspection_id", "hud_browser_cookie"):
+        st.session_state.pop(key, None)
+
 def require_login():
-    """Username UI; Supabase Auth email/password behind a server-side mapping.
-    This test-only mapping must be kept in private app secrets, never Git.
-    """
+    """Supabase email/password login via private username-to-email mapping."""
     url = config("SUPABASE_URL")
     key = config("SUPABASE_PUBLISHABLE_KEY")
     if not url or not key:
@@ -69,14 +146,15 @@ def require_login():
         st.stop()
     if st.session_state.get("auth_user") and st.session_state.get("sb_client"):
         try:
-            client = st.session_state["sb_client"]
-            session = client.auth.get_session()
+            sb = st.session_state["sb_client"]
+            session = sb.auth.get_session()
             if session and session.user and session.user.id == st.session_state["auth_user"]:
                 return
         except Exception:
             pass
-        st.session_state.pop("auth_user", None)
-        st.session_state.pop("sb_client", None)
+        sign_out_browser_session()
+    if restore_browser_session():
+        return
     st.title("🔒 HUD AI Inspector — Sign in")
     with st.form("login"):
         username = st.text_input("Username").strip().lower()
@@ -88,16 +166,17 @@ def require_login():
             email = mapping.get(username)
             if not email:
                 raise ValueError("Invalid credentials")
-            client = create_client(url, key)
-            result = client.auth.sign_in_with_password({"email": email, "password": password})
+            sb = create_client(url, key)
+            result = sb.auth.sign_in_with_password({"email": email, "password": password})
             if not result.user or not result.session:
                 raise ValueError("Invalid credentials")
-            profile = client.table("inspector_profiles").select("username").eq("user_id", result.user.id).single().execute().data
+            profile = sb.table("inspector_profiles").select("username").eq("user_id", result.user.id).single().execute().data
             if not profile or profile.get("username") != username:
                 raise ValueError("Invalid credentials")
-            st.session_state["sb_client"] = client
+            st.session_state["sb_client"] = sb
             st.session_state["auth_user"] = result.user.id
             st.session_state["authenticated"] = True
+            save_browser_session(sb, result.user.id)
             st.rerun()
         except Exception:
             st.error("Sign in failed. Check your username and password.")
@@ -669,14 +748,7 @@ with st.sidebar:
     page = st.radio('Go to', ['Dashboard', 'New / Open Inspection', 'Capture & Upload', 'Live Camera Preview', 'Continuous Live Scanner', 'Review Findings', 'Milestone 6 Review Center', 'Milestone 6 Quality Check', 'Milestone 7 Audit Trail', 'Milestone 8 Backup Validator', 'Milestone 9 Security Readiness', 'Milestone 10 Test Center', 'NSPIRE Smart Assistant', 'NSPIRE Reference Search', 'Report & Export', 'Phone Setup'], label_visibility='collapsed')
     st.caption('Supabase test-account authentication is enabled. Synthetic data only.')
     if st.button('Sign out'):
-        st.session_state['authenticated'] = False
-        try:
-            client().auth.sign_out()
-        except Exception:
-            pass
-        st.session_state.pop('sb_client', None)
-        st.session_state.pop('auth_user', None)
-        st.session_state.pop('inspection_id', None)
+        sign_out_browser_session()
         st.rerun()
 
 if page=='Dashboard':
