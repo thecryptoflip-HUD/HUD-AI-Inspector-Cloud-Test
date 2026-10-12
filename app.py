@@ -70,6 +70,7 @@ SESSION_HOURS = 8
 def login_session_store():
     return {"lock": threading.RLock(), "entries": {}}
 
+@st.cache_resource(show_spinner=False)
 def browser_cookie_manager():
     return stx.CookieManager(key="hud_dev_cookie_manager")
 
