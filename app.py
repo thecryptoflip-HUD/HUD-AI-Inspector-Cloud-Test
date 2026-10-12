@@ -873,19 +873,20 @@ with st.sidebar:
                            key='hud_interface_mode', help='Switch modes without losing saved inspection information.')
     st.caption('Both modes use the same saved inspections, photos, and reviews.')
     if chosen_mode == 'Guided mode':
-        st.markdown('### Your inspection steps')
-        if st.button('🏠 Home / What next?', key='guided_home', use_container_width=True):
+        st.caption('One task at a time. Your work is saved when you use the Save buttons.')
+        if st.button('🏠 My inspection home', key='guided_home', use_container_width=True):
             open_field_page('Dashboard')
             st.rerun()
-        for label, destination, _ in GUIDED_STEPS:
-            if st.button(label, key='guided_nav_' + destination, use_container_width=True,
-                         type='primary' if st.session_state['hud_active_page'] == destination else 'secondary'):
-                open_field_page(destination)
-                st.rerun()
-        with st.expander('Need more tools?'):
-            st.caption('Switch to Advanced mode to see camera scanners, NSPIRE search, backups, and other tools.')
-            if st.button('Open Advanced mode', use_container_width=True):
+        with st.expander('Jump to another step (optional)', expanded=False):
+            for label, destination, _ in GUIDED_STEPS:
+                if st.button(label, key='guided_nav_' + destination, use_container_width=True):
+                    open_field_page(destination)
+                    st.rerun()
+        with st.expander('More tools (optional)', expanded=False):
+            st.caption('Advanced mode has camera scanners, NSPIRE references, backups and testing tools.')
+            if st.button('Switch to Advanced mode', key='guided_advanced', use_container_width=True):
                 st.session_state['hud_interface_mode'] = 'Advanced mode'
+                open_field_page('Dashboard')
                 st.rerun()
     else:
         st.markdown('### All inspection tools')
@@ -915,40 +916,39 @@ is_guided = st.session_state['hud_interface_mode'] == 'Guided mode'
 if is_guided and page != 'Dashboard':
     if page in GUIDED_NAMES:
         st.caption('GUIDED INSPECTION')
-        st.subheader(GUIDED_NAMES[page])
-        st.info(next(description for _, destination, description in GUIDED_STEPS if destination == page))
+        st.info('Your task: ' + next(description for _, destination, description in GUIDED_STEPS if destination == page))
     else:
         st.caption('Advanced tool — your inspection records remain available in both modes.')
 
 if page=='Dashboard':
     items = rows('SELECT * FROM inspections ORDER BY created_at DESC')
     if is_guided:
-        st.subheader('Welcome! Let’s inspect a property.')
-        st.write('You do not need to be a computer expert. Follow the five steps below. Your saved information stays available when you switch modes.')
+        st.subheader('Welcome! What would you like to do?')
+        st.caption('Follow one instruction at a time. You can always return here.')
         status = guided_status()
         active = status['inspection']
         if active:
-            st.success(f"Current inspection: {active.get('property') or 'Unnamed property'} — Unit {active.get('unit') or 'not specified'}")
-            st.caption(f"Photos or video frames saved: {len(status['evidence'])}  •  AI observations: {status['findings']}  •  Still requiring review: {status['pending']}")
+            st.success(f"Selected property: {active.get('property') or 'Unnamed property'} — Unit {active.get('unit') or 'not specified'}")
+            st.caption(f"Saved pictures / frames: {len(status['evidence'])}  •  AI observations: {status['findings']}  •  Awaiting inspector review: {status['pending']}")
         else:
-            st.info('No inspection selected yet. Start with Step 1, or open a saved inspection.')
-        st.progress(status['step'] / 5, text=f"Guided workflow: {status['step']} of 5 stages reached (not an official inspection-completion score)")
+            st.info('No inspection selected. Begin by entering a property or opening one you already saved.')
         suggested = GUIDED_STEPS[status['step'] if status['step'] < 5 else 4]
-        st.markdown('### What should I do next?')
-        st.write(suggested[2])
-        if st.button('➡️ Continue: ' + suggested[0], key='guided_primary_next',
-                     use_container_width=True, type='primary'):
-            open_field_page(suggested[1])
-            st.rerun()
-        st.markdown('### All five steps')
-        for index, (label, destination, description) in enumerate(GUIDED_STEPS):
-            with st.container(border=True):
+        with st.container(border=True):
+            st.markdown('### Your suggested next step')
+            st.markdown('**' + suggested[0] + '**')
+            st.write(suggested[2])
+            if st.button('Continue →', key='guided_primary_next', use_container_width=True, type='primary'):
+                open_field_page(suggested[1])
+                st.rerun()
+        st.caption('This suggestion is based on saved records, not an official inspection-completion score. You can choose any step.')
+        with st.expander('See all five steps / go back to a step', expanded=False):
+            for index, (label, destination, description) in enumerate(GUIDED_STEPS):
                 st.markdown('**' + label + '**')
                 st.caption(description)
-                if st.button('Open this step', key='guided_home_step_' + str(index), use_container_width=True):
+                if st.button('Open ' + label, key='guided_home_step_' + str(index), use_container_width=True):
                     open_field_page(destination)
                     st.rerun()
-        st.caption('AI cannot determine whether a property passes inspection. You must verify findings and applicable HUD/NSPIRE standards in person.')
+        st.caption('AI suggestions are not official HUD/NSPIRE findings. Verify conditions and applicable standards in person.')
     else:
         st.subheader('Inspection dashboard')
         st.write('All your inspection records and professional tools are available here.')
@@ -1571,8 +1571,8 @@ if is_guided and page != 'Dashboard':
         step_index = [destination for _, destination, _ in GUIDED_STEPS].index(page)
         if step_index < len(GUIDED_STEPS) - 1:
             next_label, next_destination, _ = GUIDED_STEPS[step_index + 1]
-            st.caption('When you are ready, move to the next step. You can return at any time.')
-            if st.button('➡️ Next: ' + next_label, key='guided_footer_next',
+            st.caption('Finished here? Make sure your changes are saved before continuing.')
+            if st.button('Continue → ' + next_label, key='guided_footer_next',
                          type='primary', use_container_width=True):
                 open_field_page(next_destination)
                 st.rerun()
