@@ -187,9 +187,19 @@ def require_login():
                 save_browser_session(sb, result.user.id)
             except Exception:
                 st.warning("Signed in, but browser session persistence is unavailable.")
-            st.rerun()
+            # CookieManager writes through a browser component asynchronously.
+            # Do not rerun immediately: the component needs a rendered cycle to
+            # deliver its cookie write to the browser.
+            st.session_state["hud_login_pending"] = True
+            st.success("Signed in. Click Continue to open the dashboard.")
         except Exception:
             st.error("Sign in failed. Check your username and password.")
+
+    if st.session_state.get("hud_login_pending"):
+        st.info("Your browser is saving the login session. Wait a moment, then continue.")
+        if st.button("Continue to dashboard", use_container_width=True):
+            st.session_state.pop("hud_login_pending", None)
+            st.rerun()
     st.stop()
 
 require_login()
