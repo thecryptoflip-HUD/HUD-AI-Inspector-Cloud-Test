@@ -7,3 +7,4 @@ openai>=1.70,<3
 pypdf>=5,<7
 opencv-python-headless>=4.9,<5
 streamlit-webrtc>=0.47,<1
+extra-streamlit-components>=0.1.71,<1
