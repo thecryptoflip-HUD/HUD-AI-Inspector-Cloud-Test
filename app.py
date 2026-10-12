@@ -812,6 +812,67 @@ st.markdown("""<style>
 div.stButton > button {border-radius: 10px;}
 [data-testid="stMetric"] {padding: .6rem .9rem; border: 1px solid rgba(128,128,128,.18); border-radius: 12px;}
 </style>""", unsafe_allow_html=True)
+# Windows 11-inspired, comfortable but vivid field interface. Visual-only overrides.
+st.markdown("""
+<style>
+:root { color-scheme: light; }
+[data-testid="stAppViewContainer"] {background: #F5F8FC !important; color: #243449 !important;}
+[data-testid="stHeader"] {background: rgba(245,248,252,.94) !important;}
+[data-testid="stSidebar"], [data-testid="stSidebarContent"] {background: #EAF2FA !important;}
+[data-testid="stSidebar"] {border-right: 1px solid #D5E3F0 !important;}
+[data-testid="stSidebar"] p, [data-testid="stSidebar"] label,
+[data-testid="stSidebar"] h1, [data-testid="stSidebar"] h2,
+[data-testid="stSidebar"] h3 {color: #243449 !important;}
+.block-container {max-width: 1150px; padding-top: 1.4rem;}
+h1, h2, h3 {color: #243449 !important; letter-spacing: -.018em;}
+[data-testid="stCaptionContainer"], .stCaption {color: #566A80 !important;}
+/* Buttons: ocean blue primary, neutral raised secondary, accessible focus. */
+.stButton > button, .stFormSubmitButton > button, .stDownloadButton > button {
+    border-radius: 12px !important; min-height: 45px !important;
+    font-weight: 600 !important; transition: background-color .12s ease, border-color .12s ease, box-shadow .12s ease;
+    box-shadow: 0 2px 6px rgba(30,70,110,.08) !important;
+}
+.stButton > button[kind="primary"], .stFormSubmitButton > button[kind="primary"],
+.stDownloadButton > button[kind="primary"] {
+    background: #2878C8 !important; border: 1px solid #236FB9 !important; color: white !important;
+}
+.stButton > button[kind="primary"]:hover, .stFormSubmitButton > button[kind="primary"]:hover,
+.stDownloadButton > button[kind="primary"]:hover {background: #1D68B4 !important; border-color: #1D68B4 !important;}
+.stButton > button[kind="secondary"], .stFormSubmitButton > button[kind="secondary"],
+.stDownloadButton > button[kind="secondary"] {
+    background: #FFFFFF !important; border: 1px solid #C9D9E9 !important; color: #26465F !important;
+}
+.stButton > button[kind="secondary"]:hover, .stFormSubmitButton > button[kind="secondary"]:hover,
+.stDownloadButton > button[kind="secondary"]:hover {background: #E8F3FE !important; border-color: #78B5E8 !important;}
+.stButton > button:focus-visible, .stFormSubmitButton > button:focus-visible,
+.stDownloadButton > button:focus-visible {outline: 3px solid #7CB6EA !important; outline-offset: 2px !important;}
+/* Soft cards and form controls */
+[data-testid="stMetric"] {background: #FFFFFF !important; border: 1px solid #DBE6F0 !important;
+    border-radius: 16px !important; box-shadow: 0 3px 14px rgba(35,75,110,.05) !important; padding: 1rem !important;}
+[data-testid="stMetricValue"] {color: #226FAF !important;}
+[data-testid="stForm"], [data-testid="stExpander"] {background: #FFFFFF !important;
+    border: 1px solid #DEE8F2 !important; border-radius: 14px !important;}
+[data-testid="stTextInput"] input, [data-testid="stTextArea"] textarea,
+[data-testid="stNumberInput"] input, [data-testid="stDateInput"] input {
+    background: #FFFFFF !important; color: #243449 !important; border-radius: 9px !important;
+    border-color: #C7D8E8 !important;
+}
+[data-testid="stTextInput"] input:focus, [data-testid="stTextArea"] textarea:focus {
+    border-color: #2878C8 !important; box-shadow: 0 0 0 2px rgba(40,120,200,.15) !important;
+}
+/* Clear but gentle feedback. Do not conceal errors or caution text. */
+[data-testid="stAlert"] {border-radius: 12px !important;}
+hr {border-color: #DDE7F0 !important;}
+@media(max-width: 650px) {
+ .block-container {padding-left: .85rem !important; padding-right: .85rem !important;}
+ .stButton > button, .stFormSubmitButton > button, .stDownloadButton > button {min-height: 49px !important;}
+}
+@media(prefers-reduced-motion: reduce) {
+ .stButton > button, .stFormSubmitButton > button, .stDownloadButton > button {transition: none !important;}
+}
+</style>
+""", unsafe_allow_html=True)
+
 st.title('🏠 HUD AI Inspector')
 st.caption('Guided Field Edition • Simple guided workflow or full advanced tools • Development test environment')
 st.error('DEVELOPMENT TEST ONLY — Use invented property details and synthetic/non-resident photos. Do not upload real resident data or private inspection evidence.')
