@@ -137,13 +137,15 @@ def sign_out_browser_session():
     for key in ("authenticated", "sb_client", "auth_user", "inspection_id", "hud_browser_cookie"):
         st.session_state.pop(key, None)
 
+
 def require_login():
-    """Supabase email/password login via private username-to-email mapping."""
+    """Supabase login using a private username-to-email mapping."""
     url = config("SUPABASE_URL")
     key = config("SUPABASE_PUBLISHABLE_KEY")
     if not url or not key:
-        st.error("Set SUPABASE_URL and SUPABASE_PUBLISHABLE_KEY in private Streamlit secrets.")
+        st.error("Set SUPABASE_URL and SUPABASE_PUBLISHABLE_KEY in Streamlit secrets.")
         st.stop()
+
     if st.session_state.get("auth_user") and st.session_state.get("sb_client"):
         try:
             sb = st.session_state["sb_client"]
@@ -153,13 +155,16 @@ def require_login():
         except Exception:
             pass
         sign_out_browser_session()
+
     if restore_browser_session():
         return
+
     st.title("🔒 HUD AI Inspector — Sign in")
     with st.form("login"):
         username = st.text_input("Username").strip().lower()
         password = st.text_input("Password", type="password")
         clicked = st.form_submit_button("Sign in", use_container_width=True)
+
     if clicked:
         try:
             mapping = json.loads(config("HUD_USERNAME_EMAIL_MAP", "{}"))
@@ -170,13 +175,18 @@ def require_login():
             result = sb.auth.sign_in_with_password({"email": email, "password": password})
             if not result.user or not result.session:
                 raise ValueError("Invalid credentials")
-            profile = sb.table("inspector_profiles").select("username").eq("user_id", result.user.id).single().execute().data
+            profile = (sb.table("inspector_profiles").select("username")
+                       .eq("user_id", result.user.id).single().execute().data)
             if not profile or profile.get("username") != username:
+                sb.auth.sign_out()
                 raise ValueError("Invalid credentials")
             st.session_state["sb_client"] = sb
             st.session_state["auth_user"] = result.user.id
             st.session_state["authenticated"] = True
-            save_browser_session(sb, result.user.id)
+            try:
+                save_browser_session(sb, result.user.id)
+            except Exception:
+                st.warning("Signed in, but browser session persistence is unavailable.")
             st.rerun()
         except Exception:
             st.error("Sign in failed. Check your username and password.")
@@ -277,10 +287,13 @@ def save_photo(inspection_id, area, room, img, source, kind="photo"):
     name = eid + ".jpg"
     raw = image_bytes(img)
     object_path = f"{st.session_state['auth_user']}/{inspection_id}/{name}"
-    client().storage.from_(BUCKET).upload(object_path, raw, {"content-type": "image/jpeg", "upsert": "false"})
+    client().storage.from_(BUCKET).upload(
+        object_path, raw, {"content-type": "image/jpeg", "upsert": "false"}
+    )
     try:
         execute("INSERT INTO evidence VALUES (?,?,?,?,?,?,?,?,?,?)",
-                (eid,inspection_id,area,room,kind,name,source,datetime.now().isoformat(timespec="seconds"),"[]","{}"))
+                (eid, inspection_id, area, room, kind, name, source,
+                 datetime.now().isoformat(timespec="seconds"), "[]", "{}"))
     except Exception:
         try:
             client().storage.from_(BUCKET).remove([object_path])
