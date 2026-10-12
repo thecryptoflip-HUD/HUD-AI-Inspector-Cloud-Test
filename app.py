@@ -33,7 +33,7 @@ DATA.mkdir(parents=True, exist_ok=True)
 MEDIA = DATA / 'media'
 MEDIA.mkdir(exist_ok=True)
 
-st.set_page_config(page_title='HUD AI Inspector | Milestone 10', page_icon='🏠', layout='wide')
+st.set_page_config(page_title='HUD AI Inspector | Guided Field Edition', page_icon='🏠', layout='wide')
 st.markdown('''<style>.block-container{max-width:1100px;padding-top:1.3rem}button{min-height:2.5rem} @media(max-width:650px){.block-container{padding-left:1rem;padding-right:1rem}}</style>''', unsafe_allow_html=True)
 st.markdown("""
 <style>
@@ -813,62 +813,161 @@ div.stButton > button {border-radius: 10px;}
 [data-testid="stMetric"] {padding: .6rem .9rem; border: 1px solid rgba(128,128,128,.18); border-radius: 12px;}
 </style>""", unsafe_allow_html=True)
 st.title('🏠 HUD AI Inspector')
-st.caption('Field inspection workspace • Development test environment')
+st.caption('Guided Field Edition • Simple guided workflow or full advanced tools • Development test environment')
 st.error('DEVELOPMENT TEST ONLY — Use invented property details and synthetic/non-resident photos. Do not upload real resident data or private inspection evidence.')
 st.caption('AI visual suggestions are not official HUD/NSPIRE findings. Verify conditions and applicable standards in person.')
 
 if "hud_active_page" not in st.session_state:
     st.session_state["hud_active_page"] = "Dashboard"
+if "hud_interface_mode" not in st.session_state:
+    st.session_state["hud_interface_mode"] = "Guided mode"
+
+GUIDED_STEPS = [
+    ("1. Start inspection", "New / Open Inspection", "Enter the property and unit information, or open an existing inspection."),
+    ("2. Take pictures", "Capture & Upload", "Take or upload pictures of the areas you are inspecting."),
+    ("3. Check pictures", "Review Findings", "Ask AI to suggest visible issues, then check each suggestion in person."),
+    ("4. Review your work", "Milestone 6 Quality Check", "Check missing information and finish inspector review decisions."),
+    ("5. Save your report", "Report & Export", "Review the summary and download your PDF report."),
+]
+GUIDED_NAMES = {destination: label for label, destination, _ in GUIDED_STEPS}
+
+def guided_status():
+    """Report actual saved-record progress, never infer official inspection completion."""
+    iid = st.session_state.get("inspection_id")
+    if not iid:
+        return {"inspection": None, "evidence": [], "findings": 0, "pending": 0,
+                "reviewed": 0, "step": 0}
+    matches = rows('SELECT * FROM inspections WHERE id=?', (iid,))
+    if not matches:
+        st.session_state.pop("inspection_id", None)
+        return {"inspection": None, "evidence": [], "findings": 0, "pending": 0,
+                "reviewed": 0, "step": 0}
+    evidence = rows('SELECT * FROM evidence WHERE inspection_id=? ORDER BY captured_at,id', (iid,))
+    findings = reviewed = pending = 0
+    for item in evidence:
+        try:
+            observations = json.loads(item.get("findings_json") or "[]")
+            reviews = json.loads(item.get("reviewed_json") or "{}")
+            if not isinstance(observations, list) or not isinstance(reviews, dict):
+                continue
+            for index, observation in enumerate(observations):
+                if not isinstance(observation, dict):
+                    continue
+                findings += 1
+                decision = reviews.get(str(index), {})
+                decision = decision.get("determination") if isinstance(decision, dict) else None
+                if decision in ("Confirmed observation", "Rejected AI observation", "No deficiency observed"):
+                    reviewed += 1
+                else:
+                    pending += 1
+        except (ValueError, TypeError):
+            pending += 1
+    # Step is guidance only, not a HUD compliance or inspection-completion score.
+    step = 1 if not evidence else (2 if not findings else (3 if pending else 4))
+    return {"inspection": matches[0], "evidence": evidence, "findings": findings,
+            "pending": pending, "reviewed": reviewed, "step": step}
 
 with st.sidebar:
-    st.header('Inspection workspace')
-    st.caption('Choose your task')
-    for label, destination in FIELD_PAGES.items():
-        is_active = st.session_state["hud_active_page"] == destination
-        if st.button(("● " if is_active else "") + label, key="nav_" + destination,
-                     use_container_width=True, type="primary" if is_active else "secondary"):
-            open_field_page(destination)
+    st.header('HUD AI Inspector')
+    chosen_mode = st.radio('Choose your workspace', ['Guided mode', 'Advanced mode'],
+                           key='hud_interface_mode', help='Switch modes without losing saved inspection information.')
+    st.caption('Both modes use the same saved inspections, photos, and reviews.')
+    if chosen_mode == 'Guided mode':
+        st.markdown('### Your inspection steps')
+        if st.button('🏠 Home / What next?', key='guided_home', use_container_width=True):
+            open_field_page('Dashboard')
             st.rerun()
-    with st.expander('More tools & settings'):
-        for label, destination in FIELD_TOOLS.items():
-            if st.button(label, key="tool_" + destination, use_container_width=True):
+        for label, destination, _ in GUIDED_STEPS:
+            if st.button(label, key='guided_nav_' + destination, use_container_width=True,
+                         type='primary' if st.session_state['hud_active_page'] == destination else 'secondary'):
                 open_field_page(destination)
                 st.rerun()
+        with st.expander('Need more tools?'):
+            st.caption('Switch to Advanced mode to see camera scanners, NSPIRE search, backups, and other tools.')
+            if st.button('Open Advanced mode', use_container_width=True):
+                st.session_state['hud_interface_mode'] = 'Advanced mode'
+                st.rerun()
+    else:
+        st.markdown('### All inspection tools')
+        for label, destination in FIELD_PAGES.items():
+            if st.button(label, key='advanced_nav_' + destination, use_container_width=True,
+                         type='primary' if st.session_state['hud_active_page'] == destination else 'secondary'):
+                open_field_page(destination)
+                st.rerun()
+        with st.expander('Additional tools', expanded=True):
+            for label, destination in FIELD_TOOLS.items():
+                if st.button(label, key='advanced_tool_' + destination, use_container_width=True):
+                    open_field_page(destination)
+                    st.rerun()
+        if st.button('Return to guided home', use_container_width=True):
+            st.session_state['hud_interface_mode'] = 'Guided mode'
+            open_field_page('Dashboard')
+            st.rerun()
     st.divider()
-    st.caption('Supabase development account • Synthetic test data only')
-    if st.button('Sign out', use_container_width=True):
+    st.caption('Development account • Synthetic test data only')
+    if st.button('Sign out', key='hud_sign_out', use_container_width=True):
         sign_out_browser_session()
         st.rerun()
 
-page = st.session_state["hud_active_page"]
+page = st.session_state['hud_active_page']
+is_guided = st.session_state['hud_interface_mode'] == 'Guided mode'
+
+if is_guided and page != 'Dashboard':
+    if page in GUIDED_NAMES:
+        st.caption('GUIDED INSPECTION')
+        st.subheader(GUIDED_NAMES[page])
+        st.info(next(description for _, destination, description in GUIDED_STEPS if destination == page))
+    else:
+        st.caption('Advanced tool — your inspection records remain available in both modes.')
 
 if page=='Dashboard':
-    st.subheader('Welcome to your inspection workspace')
-    st.write('Start a new inspection, collect evidence, review observations, and export a report.')
-    items=rows('SELECT * FROM inspections ORDER BY created_at DESC')
-    a,b=st.columns(2)
-    a.metric('Saved inspections',len(items))
-    b.metric('Evidence photos / frames',len(rows('SELECT id FROM evidence')))
-    st.markdown('#### Inspection workflow')
-    action_labels = [
-        ('1. Create or open inspection', 'New / Open Inspection'),
-        ('2. Capture photos or video', 'Capture & Upload'),
-        ('3. Review AI observations', 'Review Findings'),
-        ('4. Check inspection quality', 'Milestone 6 Quality Check'),
-        ('5. Generate PDF report', 'Report & Export'),
-    ]
-    for label, destination in action_labels:
-        if st.button(label, key='home_'+destination, use_container_width=True):
-            open_field_page(destination)
+    items = rows('SELECT * FROM inspections ORDER BY created_at DESC')
+    if is_guided:
+        st.subheader('Welcome! Let’s inspect a property.')
+        st.write('You do not need to be a computer expert. Follow the five steps below. Your saved information stays available when you switch modes.')
+        status = guided_status()
+        active = status['inspection']
+        if active:
+            st.success(f"Current inspection: {active.get('property') or 'Unnamed property'} — Unit {active.get('unit') or 'not specified'}")
+            st.caption(f"Photos or video frames saved: {len(status['evidence'])}  •  AI observations: {status['findings']}  •  Still requiring review: {status['pending']}")
+        else:
+            st.info('No inspection selected yet. Start with Step 1, or open a saved inspection.')
+        st.progress(status['step'] / 5, text=f"Guided workflow: {status['step']} of 5 stages reached (not an official inspection-completion score)")
+        suggested = GUIDED_STEPS[status['step'] if status['step'] < 5 else 4]
+        st.markdown('### What should I do next?')
+        st.write(suggested[2])
+        if st.button('➡️ Continue: ' + suggested[0], key='guided_primary_next',
+                     use_container_width=True, type='primary'):
+            open_field_page(suggested[1])
             st.rerun()
-    st.markdown('#### Recent inspections')
-    if items:
-        st.dataframe([{'Property':x['property'],'Unit':x['unit'],
-                       'Date':x['inspected_on'],'Inspector':x['inspector']}
-                      for x in items[:15]], hide_index=True, use_container_width=True)
-        st.caption('Open an existing inspection from the Inspections menu.')
+        st.markdown('### All five steps')
+        for index, (label, destination, description) in enumerate(GUIDED_STEPS):
+            with st.container(border=True):
+                st.markdown('**' + label + '**')
+                st.caption(description)
+                if st.button('Open this step', key='guided_home_step_' + str(index), use_container_width=True):
+                    open_field_page(destination)
+                    st.rerun()
+        st.caption('AI cannot determine whether a property passes inspection. You must verify findings and applicable HUD/NSPIRE standards in person.')
     else:
-        st.info('No inspections yet. Select “1. Create or open inspection” to begin using synthetic test data.')
+        st.subheader('Inspection dashboard')
+        st.write('All your inspection records and professional tools are available here.')
+        a, b = st.columns(2)
+        a.metric('Saved inspections', len(items))
+        b.metric('Evidence photos / frames', len(rows('SELECT id FROM evidence')))
+        st.markdown('#### Quick actions')
+        for label, destination in FIELD_PAGES.items():
+            if st.button(label, key='advanced_home_' + destination, use_container_width=True):
+                open_field_page(destination)
+                st.rerun()
+    st.markdown('#### Saved inspections')
+    if items:
+        st.dataframe([{'Property': x['property'], 'Unit': x['unit'],
+                       'Date': x['inspected_on'], 'Inspector': x['inspector']}
+                      for x in items[:15]], hide_index=True, use_container_width=True)
+        st.caption('Select “Start inspection” to open a saved inspection.')
+    else:
+        st.info('No inspections saved yet. Use invented property details for development testing.')
 
 elif page=='New / Open Inspection':
     st.subheader('Create inspection')
@@ -1463,3 +1562,22 @@ elif page=='Phone Setup':
 **Security:** This is a single-password application, not a multi-inspector access-control system. Do not share your password, `.env`, or private inspection images. For deployment to multiple inspectors, additional authentication, auditing, and data protection are needed.''')
     st.link_button('Tailscale official Serve documentation','https://tailscale.com/kb/1312/serve')
     st.link_button('Streamlit official security documentation','https://docs.streamlit.io/develop/concepts/connections/security')
+
+
+# Navigation is outside individual page branches so all original tools remain intact.
+if is_guided and page != 'Dashboard':
+    st.divider()
+    if page in GUIDED_NAMES:
+        step_index = [destination for _, destination, _ in GUIDED_STEPS].index(page)
+        if step_index < len(GUIDED_STEPS) - 1:
+            next_label, next_destination, _ = GUIDED_STEPS[step_index + 1]
+            st.caption('When you are ready, move to the next step. You can return at any time.')
+            if st.button('➡️ Next: ' + next_label, key='guided_footer_next',
+                         type='primary', use_container_width=True):
+                open_field_page(next_destination)
+                st.rerun()
+        else:
+            st.caption('Download the PDF and backup above. Saving a report is not an official HUD approval.')
+    if st.button('🏠 Back to guided home', key='guided_footer_home', use_container_width=True):
+        open_field_page('Dashboard')
+        st.rerun()
